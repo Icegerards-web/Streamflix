@@ -1,0 +1,5 @@
+{
+  "name": "StreamFlix IPTV",
+  "description": "A high-performance, Netflix-style IPTV player with Dutch, English, and German language filtering.",
+  "requestFramePermissions": []
+}

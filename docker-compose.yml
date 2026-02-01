@@ -1,0 +1,15 @@
+version: '3.8'
+
+services:
+  streamflix:
+    build: .
+    container_name: streamflix_app
+    restart: always
+    ports:
+      - "80:80"
+    volumes:
+      # Map the local 'data' folder to the container's web root
+      # This allows you to update 'playlist.json' on the host without rebuilding
+      - ./data/playlist.json:/usr/share/nginx/html/playlist.json
+    environment:
+      - NODE_ENV=production
