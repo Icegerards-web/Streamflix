@@ -3,6 +3,8 @@ import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
 import compression from 'compression';
+import { createGunzip } from 'zlib';
+import { pipeline } from 'stream/promises';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -18,7 +20,7 @@ if (!fs.existsSync(DATA_DIR)) {
 }
 
 app.use(compression());
-// Keep json support for other potential endpoints, but limit is less relevant for chunks
+// Keep json support for other potential endpoints
 app.use(express.json({ limit: '10mb' }));
 
 // CORS Middleware
@@ -39,7 +41,7 @@ app.use(express.static(path.join(__dirname, 'dist')));
 // Accepts raw binary data for each chunk
 app.post('/api/upload-chunk', express.raw({ type: 'application/octet-stream', limit: '50mb' }), async (req, res) => {
     try {
-        const { id, index, total } = req.query;
+        const { id, index, total, compressed } = req.query;
         
         if (!id || index === undefined || !total) {
             return res.status(400).json({ error: "Missing upload parameters (id, index, total)" });
@@ -47,7 +49,11 @@ app.post('/api/upload-chunk', express.raw({ type: 'application/octet-stream', li
 
         const chunkIndex = parseInt(index as string);
         const totalChunks = parseInt(total as string);
-        const tempFilePath = path.join(DATA_DIR, `temp_upload_${id}.json`);
+        const isCompressed = compressed === 'true';
+        
+        // We use a different temp file extension depending on if it's compressed or not
+        const tempFileName = `temp_upload_${id}.${isCompressed ? 'gz' : 'json'}`;
+        const tempFilePath = path.join(DATA_DIR, tempFileName);
         
         // chunk data is in req.body because of express.raw()
         const chunkData = req.body;
@@ -60,13 +66,28 @@ app.post('/api/upload-chunk', express.raw({ type: 'application/octet-stream', li
             await fs.promises.appendFile(tempFilePath, chunkData);
         }
 
-        console.log(`[Server] Processed chunk ${chunkIndex + 1}/${totalChunks} for upload ${id}`);
+        console.log(`[Server] Processed chunk ${chunkIndex + 1}/${totalChunks} for upload ${id} (Compressed: ${isCompressed})`);
 
         // Check if finished
         if (chunkIndex === totalChunks - 1) {
-            // Move temp file to final destination
-            await fs.promises.rename(tempFilePath, DATA_FILE);
-            console.log(`[Server] Upload ${id} complete. Playlist updated.`);
+            console.log(`[Server] Upload ${id} transfer complete. Processing...`);
+            
+            if (isCompressed) {
+                // Decompress the file
+                console.log(`[Server] Decompressing...`);
+                await pipeline(
+                    fs.createReadStream(tempFilePath),
+                    createGunzip(),
+                    fs.createWriteStream(DATA_FILE)
+                );
+                // Clean up the temp GZ file
+                await fs.promises.unlink(tempFilePath).catch(() => {});
+            } else {
+                // Just rename the temp file to the final file
+                await fs.promises.rename(tempFilePath, DATA_FILE);
+            }
+            
+            console.log(`[Server] Playlist updated successfully.`);
             return res.json({ success: true, complete: true });
         }
 

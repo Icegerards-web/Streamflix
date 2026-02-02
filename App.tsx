@@ -252,7 +252,7 @@ const App: React.FC = () => {
       reader.readAsText(file);
   };
 
-  // --- REBUILT SYNC: ROBUST CHUNKED UPLOAD ---
+  // --- COMPRESSED CHUNK UPLOAD (FIXED FOR TIMEOUTS) ---
   const handleSyncToServer = async () => {
       if (allChannels.length === 0) return;
       
@@ -260,13 +260,27 @@ const App: React.FC = () => {
       setUploadProgress(0);
 
       try {
-          // Convert data to Blob
           const jsonString = JSON.stringify(allChannels);
-          const blob = new Blob([jsonString], { type: 'application/json' });
+          let blob: Blob;
+          let isCompressed = false;
+
+          // Attempt Compression (Reduces size by ~90%, preventing timeouts)
+          if ('CompressionStream' in window) {
+              try {
+                  const stream = new Blob([jsonString]).stream().pipeThrough(new CompressionStream('gzip'));
+                  blob = await new Response(stream).blob();
+                  isCompressed = true;
+                  console.log(`Compressed: ${(blob.size / 1024 / 1024).toFixed(2)}MB (Original: ${(jsonString.length / 1024 / 1024).toFixed(2)}MB)`);
+              } catch (e) {
+                  console.warn("Compression failed, falling back to raw upload", e);
+                  blob = new Blob([jsonString], { type: 'application/json' });
+              }
+          } else {
+              blob = new Blob([jsonString], { type: 'application/json' });
+          }
           
           const TOTAL_SIZE = blob.size;
-          // REDUCE CHUNK SIZE TO 1MB TO PREVENT TIMEOUTS
-          const CHUNK_SIZE = 1 * 1024 * 1024; 
+          const CHUNK_SIZE = 1 * 1024 * 1024; // 1MB Chunks (Small enough for any gateway)
           const TOTAL_CHUNKS = Math.ceil(TOTAL_SIZE / CHUNK_SIZE);
           const UPLOAD_ID = Date.now().toString() + "_" + Math.floor(Math.random() * 1000);
 
@@ -284,7 +298,7 @@ const App: React.FC = () => {
 
               while (attempts < 3 && !success) {
                   try {
-                      const res = await fetch(`/api/upload-chunk?id=${UPLOAD_ID}&index=${i}&total=${TOTAL_CHUNKS}`, {
+                      const res = await fetch(`/api/upload-chunk?id=${UPLOAD_ID}&index=${i}&total=${TOTAL_CHUNKS}&compressed=${isCompressed}`, {
                           method: 'POST',
                           headers: {
                               'Content-Type': 'application/octet-stream'
@@ -300,24 +314,22 @@ const App: React.FC = () => {
                       lastError = e;
                       attempts++;
                       console.warn(`Chunk ${i} failed (Attempt ${attempts}/3). Retrying...`);
-                      // Exponential backoff: 500ms, 1000ms, 2000ms
                       await new Promise(r => setTimeout(r, 500 * Math.pow(2, attempts - 1)));
                   }
               }
 
               if (!success) {
-                  throw new Error(`Failed to upload chunk ${i} after 3 attempts. Last error: ${lastError?.message}`);
+                  throw new Error(`Failed to upload chunk ${i}. Last error: ${lastError?.message}`);
               }
 
-              // Update progress UI
               setUploadProgress(Math.round(((i + 1) / TOTAL_CHUNKS) * 100));
               
-              // Throttle: Small delay to let server file I/O catch up and prevent Nginx buffer flooding
-              await new Promise(r => setTimeout(r, 50));
+              // Slight throttle to keep server happy
+              await new Promise(r => setTimeout(r, 20));
           }
 
           setAutoConfigured(true);
-          alert("Sync successful! Open StreamFlix on your iPad or TV to load this library.");
+          alert("Sync successful! The library has been compressed and saved to the server.");
 
       } catch (e: any) {
           console.error(e);
