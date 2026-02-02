@@ -252,7 +252,7 @@ const App: React.FC = () => {
       reader.readAsText(file);
   };
 
-  // --- REBUILT SYNC: CHUNKED UPLOAD ---
+  // --- REBUILT SYNC: ROBUST CHUNKED UPLOAD ---
   const handleSyncToServer = async () => {
       if (allChannels.length === 0) return;
       
@@ -260,12 +260,13 @@ const App: React.FC = () => {
       setUploadProgress(0);
 
       try {
-          // 1. Convert data to Blob (Handles large data better than string)
+          // Convert data to Blob
           const jsonString = JSON.stringify(allChannels);
           const blob = new Blob([jsonString], { type: 'application/json' });
           
           const TOTAL_SIZE = blob.size;
-          const CHUNK_SIZE = 5 * 1024 * 1024; // 5MB chunks
+          // REDUCE CHUNK SIZE TO 1MB TO PREVENT TIMEOUTS
+          const CHUNK_SIZE = 1 * 1024 * 1024; 
           const TOTAL_CHUNKS = Math.ceil(TOTAL_SIZE / CHUNK_SIZE);
           const UPLOAD_ID = Date.now().toString() + "_" + Math.floor(Math.random() * 1000);
 
@@ -276,21 +277,43 @@ const App: React.FC = () => {
               const end = Math.min(start + CHUNK_SIZE, TOTAL_SIZE);
               const chunk = blob.slice(start, end);
 
-              // Upload chunk
-              const res = await fetch(`/api/upload-chunk?id=${UPLOAD_ID}&index=${i}&total=${TOTAL_CHUNKS}`, {
-                  method: 'POST',
-                  headers: {
-                      'Content-Type': 'application/octet-stream'
-                  },
-                  body: chunk
-              });
+              // Retry Logic: Try 3 times per chunk
+              let attempts = 0;
+              let success = false;
+              let lastError;
 
-              if (!res.ok) {
-                  throw new Error(`Chunk ${i} failed with status ${res.status}`);
+              while (attempts < 3 && !success) {
+                  try {
+                      const res = await fetch(`/api/upload-chunk?id=${UPLOAD_ID}&index=${i}&total=${TOTAL_CHUNKS}`, {
+                          method: 'POST',
+                          headers: {
+                              'Content-Type': 'application/octet-stream'
+                          },
+                          body: chunk
+                      });
+
+                      if (!res.ok) {
+                          throw new Error(`Status ${res.status}`);
+                      }
+                      success = true;
+                  } catch (e: any) {
+                      lastError = e;
+                      attempts++;
+                      console.warn(`Chunk ${i} failed (Attempt ${attempts}/3). Retrying...`);
+                      // Exponential backoff: 500ms, 1000ms, 2000ms
+                      await new Promise(r => setTimeout(r, 500 * Math.pow(2, attempts - 1)));
+                  }
+              }
+
+              if (!success) {
+                  throw new Error(`Failed to upload chunk ${i} after 3 attempts. Last error: ${lastError?.message}`);
               }
 
               // Update progress UI
               setUploadProgress(Math.round(((i + 1) / TOTAL_CHUNKS) * 100));
+              
+              // Throttle: Small delay to let server file I/O catch up and prevent Nginx buffer flooding
+              await new Promise(r => setTimeout(r, 50));
           }
 
           setAutoConfigured(true);
@@ -332,7 +355,6 @@ const App: React.FC = () => {
     }
   };
 
-  // Calculate Stats for Settings Menu
   const libraryStats = useMemo(() => {
       return {
           live: allChannels.filter(c => c.contentType === 'live').length,
@@ -342,7 +364,6 @@ const App: React.FC = () => {
       };
   }, [allChannels]);
 
-  // Filter Logic with Search
   const filteredCategories = useMemo(() => {
     const targetType = currentView === 'live' ? 'live' : (currentView === 'series' ? 'series' : 'movie');
     const result: Category[] = [];
