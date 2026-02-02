@@ -34,8 +34,9 @@ const PlaylistSetup: React.FC<PlaylistSetupProps> = ({ onImportM3U, onImportXtre
   };
 
   return (
-    <div className="min-h-screen bg-[url('https://assets.nflxext.com/ffe/siteui/vlv3/c38a2d52-138e-48a3-ab68-36787ece46b3/eeb03fc9-99c6-438e-824d-32917ce55783/NL-en-20240101-popsignuptwoweeks-perspective_alpha_website_large.jpg')] bg-cover bg-center flex items-center justify-center relative">
-      <div className="absolute inset-0 bg-black/60"></div>
+    <div className="min-h-screen bg-gray-900 flex items-center justify-center relative overflow-hidden">
+      {/* Background Gradient */}
+      <div className="absolute inset-0 bg-gradient-to-br from-black via-gray-900 to-[#141414] z-0"></div>
       
       <div className="relative z-10 w-full max-w-md bg-black/75 p-8 md:p-12 rounded shadow-2xl backdrop-blur-sm border border-gray-800">
         <h1 className="text-3xl font-bold text-white mb-8 text-center">Sign In</h1>

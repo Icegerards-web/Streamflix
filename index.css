@@ -1,0 +1,11 @@
+/* 
+   Tailwind is handled via CDN in index.html for this environment.
+   This file is reserved for any custom global overrides if needed.
+*/
+
+body {
+    margin: 0;
+    padding: 0;
+    background-color: #141414;
+    color: white;
+}
