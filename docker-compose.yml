@@ -8,8 +8,8 @@ services:
     ports:
       - "80:80"
     volumes:
-      # Map the local 'data' folder to the container's web root
-      # This allows you to update 'playlist.json' on the host without rebuilding
-      - ./data/playlist.json:/usr/share/nginx/html/playlist.json
+      # Map the local 'data' folder to the container's data directory
+      # This ensures playlist.json persists across restarts
+      - ./data:/app/data
     environment:
       - NODE_ENV=production

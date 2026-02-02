@@ -11,12 +11,14 @@ interface SettingsMenuProps {
   };
   onExport: () => void;
   onImport: (file: File) => void;
+  onSync: () => void;
   onLogout: () => void;
   isAutoConfig: boolean;
+  isSyncing: boolean;
 }
 
 const SettingsMenu: React.FC<SettingsMenuProps> = ({ 
-  isOpen, onClose, stats, onExport, onImport, onLogout, isAutoConfig 
+  isOpen, onClose, stats, onExport, onImport, onSync, onLogout, isAutoConfig, isSyncing 
 }) => {
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -77,31 +79,52 @@ const SettingsMenu: React.FC<SettingsMenuProps> = ({
                className="hidden"
              />
 
+             {/* SERVER SYNC BUTTON */}
              <button 
-                onClick={onExport}
-                className="w-full bg-gray-700 hover:bg-gray-600 text-white font-medium py-3 rounded flex items-center justify-center gap-2 transition text-sm"
+                onClick={onSync}
+                disabled={isSyncing}
+                className="w-full bg-red-600 hover:bg-red-700 text-white font-bold py-3 rounded flex items-center justify-center gap-2 transition text-sm shadow-lg shadow-red-900/20"
              >
-                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-5 h-5">
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5M16.5 12L12 16.5m0 0L7.5 12m4.5 4.5V3" />
-                </svg>
-                Save Data (JSON)
+                {isSyncing ? (
+                    <div className="w-5 h-5 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
+                ) : (
+                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-5 h-5">
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M12 16.5V9.75m0 0 3 3m-3-3-3 3M6.75 19.5a4.5 4.5 0 0 1-1.41-8.775 5.25 5.25 0 0 1 10.233-2.33 3 3 0 0 1 3.758 3.848A3.752 3.752 0 0 1 18 19.5H6.75Z" />
+                    </svg>
+                )}
+                {isSyncing ? "Syncing to Server..." : "Sync to Server"}
              </button>
+             <p className="text-[10px] text-gray-500 text-center -mt-1 mb-2">
+                 Uploads current library to the server. Other devices will see this content.
+             </p>
 
-             <button 
-                onClick={() => fileInputRef.current?.click()}
-                className="w-full bg-gray-700 hover:bg-gray-600 text-white font-medium py-3 rounded flex items-center justify-center gap-2 transition text-sm"
-             >
-                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-5 h-5">
-                    <path strokeLinecap="round" strokeLinejoin="round" d="M3 16.5v2.25A2.25 2.25 0 0 0 5.25 21h13.5A2.25 2.25 0 0 0 21 18.75V16.5m-13.5-9L12 3m0 0 4.5 4.5M12 3v13.5" />
-                </svg>
-                Upload Backup
-             </button>
+             <div className="grid grid-cols-2 gap-2">
+                 <button 
+                    onClick={onExport}
+                    className="bg-gray-700 hover:bg-gray-600 text-white font-medium py-2 rounded flex items-center justify-center gap-2 transition text-xs"
+                 >
+                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-4 h-4">
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5M16.5 12L12 16.5m0 0L7.5 12m4.5 4.5V3" />
+                    </svg>
+                    Download JSON
+                 </button>
+
+                 <button 
+                    onClick={() => fileInputRef.current?.click()}
+                    className="bg-gray-700 hover:bg-gray-600 text-white font-medium py-2 rounded flex items-center justify-center gap-2 transition text-xs"
+                 >
+                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-4 h-4">
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M3 16.5v2.25A2.25 2.25 0 0 0 5.25 21h13.5A2.25 2.25 0 0 0 21 18.75V16.5m-13.5-9L12 3m0 0 4.5 4.5M12 3v13.5" />
+                    </svg>
+                    Import JSON
+                 </button>
+             </div>
 
              <button 
                 onClick={onLogout}
-                className="w-full bg-transparent border border-gray-600 text-gray-300 hover:border-red-600 hover:text-red-500 font-medium py-3 rounded transition text-sm"
+                className="w-full bg-transparent border border-gray-600 text-gray-300 hover:border-red-600 hover:text-red-500 font-medium py-3 rounded transition text-sm mt-2"
              >
-                {isAutoConfig ? "Reload Server Config" : "Logout & Clear Data"}
+                {isAutoConfig ? "Reload Server Content" : "Logout & Clear Data"}
              </button>
           </div>
         </div>

@@ -25,6 +25,7 @@ const App: React.FC = () => {
   // New State for Settings & Search
   const [showSettings, setShowSettings] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
+  const [isSyncing, setIsSyncing] = useState(false);
 
   // --- PERSISTENCE & AUTO-CONFIG ---
   useEffect(() => {
@@ -47,10 +48,11 @@ const App: React.FC = () => {
                   
                   setLoading(false);
                   setLoadingStatus('');
+                  // Background check for server update? Optional.
                   return;
               }
 
-              // 2. Try Server-Hosted JSON (Static File)
+              // 2. Try Server-Hosted JSON (From "Sync to Server")
               try {
                   const staticResponse = await fetch('playlist.json');
                   if (staticResponse.ok) {
@@ -226,7 +228,7 @@ const App: React.FC = () => {
                   setLoading(false);
                   setLoadingStatus('');
                   setShowSettings(false);
-                  alert("Backup restored successfully!");
+                  alert("Backup restored locally!");
               } else {
                   alert("Invalid backup file. Expected a list of channels.");
               }
@@ -236,6 +238,32 @@ const App: React.FC = () => {
           }
       };
       reader.readAsText(file);
+  };
+
+  // --- NEW: SYNC TO SERVER ---
+  const handleSyncToServer = async () => {
+      if (allChannels.length === 0) return;
+      
+      setIsSyncing(true);
+      try {
+          const res = await fetch('/api/upload', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(allChannels)
+          });
+          
+          if (res.ok) {
+              setAutoConfigured(true);
+              alert("Sync successful! Open StreamFlix on your iPad or TV, and it will load this content automatically.");
+          } else {
+              alert("Sync failed. The server might be read-only or unreachable.");
+          }
+      } catch (e) {
+          console.error(e);
+          alert("Network error during sync.");
+      } finally {
+          setIsSyncing(false);
+      }
   };
 
   const handleLogout = async () => {
@@ -350,8 +378,10 @@ const App: React.FC = () => {
         stats={libraryStats}
         onExport={handleExportData}
         onImport={handleImportData}
+        onSync={handleSyncToServer}
         onLogout={handleLogout}
         isAutoConfig={autoConfigured}
+        isSyncing={isSyncing}
       />
       
       {/* Hero only on Home and when not searching */}
