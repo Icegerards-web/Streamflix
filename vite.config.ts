@@ -1,13 +1,16 @@
-import { defineConfig } from 'vite';
-import react from '@vitejs/plugin-react';
+import { defineConfig } from 'vite'
+import react from '@vitejs/plugin-react'
 
 export default defineConfig({
   plugins: [react()],
-  build: {
-    outDir: 'dist',
-    sourcemap: false
-  },
+  // This section is for 'npm run dev'
   server: {
-    port: 3000
+    allowedHosts: ['iptv.jarvis-icebo.duckdns.org'],
+    host: true
+  },
+  // This section is for 'npm run preview' (Streamflix typically uses this)
+  preview: {
+    allowedHosts: ['iptv.jarvis-icebo.duckdns.org'],
+    host: true
   }
-});
+})

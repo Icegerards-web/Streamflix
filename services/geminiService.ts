@@ -1,12 +1,11 @@
 import { GoogleGenAI } from "@google/genai";
 
-// We strictly follow the provided documentation for Gemini initialization.
+// Initialization helper
 const getClient = () => {
-    // Check if API KEY is available. In a real app this comes from env. 
-    // For this demo, we handle the case gracefully if missing.
-    const apiKey = process.env.API_KEY || ''; 
-    if (!apiKey) return null;
-    return new GoogleGenAI({ apiKey });
+    // Check if API KEY is available. 
+    // The API key must be obtained exclusively from the environment variable process.env.API_KEY.
+    if (!process.env.API_KEY) return null;
+    return new GoogleGenAI({ apiKey: process.env.API_KEY });
 };
 
 export const getContentRecommendation = async (playlistContext: string): Promise<string> => {
@@ -14,12 +13,16 @@ export const getContentRecommendation = async (playlistContext: string): Promise
   if (!ai) return "AI services unavailable (Missing API Key)";
 
   try {
+    // Note: Using a model compatible with the standard SDK
     const response = await ai.models.generateContent({
-        model: 'gemini-3-flash-preview',
-        contents: `Based on this list of available channel categories: ${playlistContext}. 
+        model: "gemini-3-flash-preview",
+        contents: `
+        Based on this list of available channel categories: ${playlistContext}. 
         Recommend one category to watch for a user who likes action and thrillers. 
-        Keep it very short, under 20 words.`,
+        Keep it very short, under 20 words.
+    `
     });
+    
     return response.text || "Check out the Action category!";
   } catch (error) {
     console.error("Gemini Error:", error);
@@ -33,7 +36,7 @@ export const enhanceDescription = async (title: string): Promise<string> => {
 
     try {
         const response = await ai.models.generateContent({
-            model: 'gemini-3-flash-preview',
+            model: "gemini-3-flash-preview",
             contents: `Write a 2 sentence engaging synopsis for the movie/show: "${title}".`
         });
         return response.text || "No description available.";
