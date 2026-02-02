@@ -18,8 +18,8 @@ if (!fs.existsSync(DATA_DIR)) {
 }
 
 app.use(compression());
-// Increase payload limit for large playlists (50mb)
-app.use(express.json({ limit: '50mb' }));
+// Increase payload limit for large playlists (500mb) to avoid 413 Errors
+app.use(express.json({ limit: '500mb' }));
 
 // CORS Middleware to allow dev server requests
 app.use((req, res, next) => {

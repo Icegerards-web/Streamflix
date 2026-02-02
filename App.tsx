@@ -58,7 +58,7 @@ const App: React.FC = () => {
               try {
                   // Add a timeout to prevent hanging if server is down
                   const controller = new AbortController();
-                  const timeoutId = setTimeout(() => controller.abort(), 3000);
+                  const timeoutId = setTimeout(() => controller.abort(), 5000); // 5s fast check for load
                   
                   const staticResponse = await fetch('playlist.json', { signal: controller.signal });
                   clearTimeout(timeoutId);
@@ -262,7 +262,8 @@ const App: React.FC = () => {
       try {
           // Use AbortController to timeout the request if server hangs
           const controller = new AbortController();
-          const timeoutId = setTimeout(() => controller.abort(), 10000); // 10s timeout
+          // INCREASED TIMEOUT TO 120 SECONDS (2 Minutes)
+          const timeoutId = setTimeout(() => controller.abort(), 120000); 
           
           const res = await fetch('/api/upload', {
               method: 'POST',
@@ -281,7 +282,7 @@ const App: React.FC = () => {
       } catch (e) {
           console.error(e);
           const confirmLocal = window.confirm(
-              "Sync failed (Server unreachable). Would you like to save a local Backup file instead?"
+              "Sync failed (Server unreachable or Timeout). Would you like to save a local Backup file instead?"
           );
           if (confirmLocal) {
               handleExportData();
