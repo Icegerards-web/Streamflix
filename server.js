@@ -111,7 +111,7 @@ app.post('/api/upload-chunk', express.raw({ type: 'application/octet-stream', li
                     const partPath = path.join(DATA_DIR, `upload_${id}_part_${i}`);
                     const data = fs.readFileSync(partPath);
                     fs.appendFileSync(tempCompleteFile, data);
-                    fs.unlinkSync(partPath); // Clean up immediately
+                    // CRITICAL: Do NOT delete parts yet. If merge fails later, we need them for retry.
                 }
             } catch (mergeErr) {
                 console.error("[Server] Merge IO Error:", mergeErr);
@@ -121,12 +121,26 @@ app.post('/api/upload-chunk', express.raw({ type: 'application/octet-stream', li
             // 3. Rename to playlist.json (Atomic operation)
             console.log(`[Server] Renaming ${id} to playlist.json...`);
             try {
-                // If target exists, delete it first (Windows compatibility)
-                if (fs.existsSync(DATA_FILE)) fs.unlinkSync(DATA_FILE);
+                // Remove existing file. Use rmSync to handle if it's accidentally a directory (EISDIR fix).
+                if (fs.existsSync(DATA_FILE)) {
+                    fs.rmSync(DATA_FILE, { recursive: true, force: true });
+                }
                 fs.renameSync(tempCompleteFile, DATA_FILE);
             } catch (renameErr) {
                 console.error("[Server] Rename Error:", renameErr);
-                return res.status(500).json({ error: "Could not save final playlist file." });
+                // If rename fails, we still have parts. Client can retry.
+                return res.status(500).json({ error: "Could not save final playlist file: " + renameErr.message });
+            }
+
+            // 4. Cleanup parts ONLY after successful rename
+            console.log(`[Server] Cleanup parts for ${id}...`);
+            try {
+                for (let i = 0; i < totalChunks; i++) {
+                    const partPath = path.join(DATA_DIR, `upload_${id}_part_${i}`);
+                    if (fs.existsSync(partPath)) fs.unlinkSync(partPath);
+                }
+            } catch (cleanupErr) {
+                console.warn("[Server] Cleanup warning (non-fatal):", cleanupErr.message);
             }
 
             console.log(`[Server] Upload ${id} complete.`);
