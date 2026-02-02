@@ -35,17 +35,15 @@ const App: React.FC = () => {
           setLoadingStatus('Checking library...');
           
           try {
-              // 1. Try Local Cache first (Fastest - Instant Resume)
+              // 1. Try Local Cache first
               const cached = await loadFromDB();
               if (cached && cached.allChannels.length > 0) {
-                  // We re-run categorization here to ensure any code updates to sorting/filtering apply to cached data
                   const { categories: recategorized } = categorizeChannels(cached.allChannels);
                   setCategories(recategorized);
                   setAllChannels(cached.allChannels);
                   pickFeatured(cached.allChannels);
                   setIsSetupComplete(true);
                   
-                  // Background check for server file
                   checkStaticFileExists().then(exists => {
                       if (exists || SERVER_CONFIG.url) setAutoConfigured(true);
                   });
@@ -55,10 +53,10 @@ const App: React.FC = () => {
                   return;
               }
 
-              // 2. Try Server-Hosted JSON (From "Sync to Server")
+              // 2. Try Server-Hosted JSON
               try {
                   const controller = new AbortController();
-                  const timeoutId = setTimeout(() => controller.abort(), 5000); // 5s fast check for load
+                  const timeoutId = setTimeout(() => controller.abort(), 5000);
                   
                   const staticResponse = await fetch('playlist.json', { signal: controller.signal });
                   clearTimeout(timeoutId);
@@ -69,7 +67,7 @@ const App: React.FC = () => {
                       if (Array.isArray(staticData) && staticData.length > 0) {
                            console.log("Loaded from playlist.json");
                            setAutoConfigured(true);
-                           await processPlaylistData(staticData); // Process and Cache
+                           await processPlaylistData(staticData);
                            setLoading(false);
                            setLoadingStatus('');
                            return;
@@ -79,13 +77,11 @@ const App: React.FC = () => {
                   console.log("No static playlist.json found or server unreachable, continuing...");
               }
 
-              // 3. If no cache and no static file, check Server Config (Auto-Connect to IPTV)
+              // 3. Server Config
               if (SERVER_CONFIG.url && SERVER_CONFIG.username && SERVER_CONFIG.password) {
-                  console.log("Auto-connecting using Server Config...");
                   setAutoConfigured(true);
                   handleXtreamImport(SERVER_CONFIG.url, SERVER_CONFIG.username, SERVER_CONFIG.password);
               } else {
-                  // 4. Manual Login required
                   setLoading(false);
                   setLoadingStatus('');
               }
@@ -252,98 +248,109 @@ const App: React.FC = () => {
       reader.readAsText(file);
   };
 
-  // --- COMPRESSED CHUNK UPLOAD WITH HEALTH CHECK ---
+  // --- UPLOAD LOGIC ---
+  const performUpload = async (channels: Channel[], useCompression: boolean) => {
+      const jsonString = JSON.stringify(channels);
+      let blob: Blob;
+
+      if (useCompression && 'CompressionStream' in window) {
+          try {
+              const stream = new Blob([jsonString]).stream().pipeThrough(new CompressionStream('gzip'));
+              blob = await new Response(stream).blob();
+              console.log(`Compressed: ${(blob.size / 1024 / 1024).toFixed(2)}MB`);
+          } catch (e) {
+              console.warn("Compression failed, using raw JSON");
+              blob = new Blob([jsonString], { type: 'application/json' });
+              useCompression = false;
+          }
+      } else {
+          blob = new Blob([jsonString], { type: 'application/json' });
+          useCompression = false;
+      }
+
+      const TOTAL_SIZE = blob.size;
+      const CHUNK_SIZE = 1 * 1024 * 1024; // 1MB
+      const TOTAL_CHUNKS = Math.ceil(TOTAL_SIZE / CHUNK_SIZE);
+      const UPLOAD_ID = Date.now().toString() + "_" + Math.floor(Math.random() * 1000);
+
+      console.log(`Uploading ${TOTAL_CHUNKS} chunks. Compressed: ${useCompression}`);
+
+      for (let i = 0; i < TOTAL_CHUNKS; i++) {
+          const start = i * CHUNK_SIZE;
+          const end = Math.min(start + CHUNK_SIZE, TOTAL_SIZE);
+          const chunk = blob.slice(start, end);
+
+          let attempts = 0;
+          let success = false;
+          let lastErr;
+
+          while (attempts < 3 && !success) {
+              try {
+                  const res = await fetch(`/api/upload-chunk?id=${UPLOAD_ID}&index=${i}&total=${TOTAL_CHUNKS}&compressed=${useCompression}`, {
+                      method: 'POST',
+                      headers: { 'Content-Type': 'application/octet-stream' },
+                      body: chunk
+                  });
+
+                  if (!res.ok) throw new Error(await res.text());
+                  success = true;
+              } catch (e: any) {
+                  lastErr = e;
+                  attempts++;
+                  console.warn(`Chunk ${i} retry ${attempts}/3`);
+                  await new Promise(r => setTimeout(r, 1000 * Math.pow(2, attempts - 1)));
+              }
+          }
+
+          if (!success) throw new Error(`Upload failed at chunk ${i}: ${lastErr?.message}`);
+          setUploadProgress(Math.round(((i + 1) / TOTAL_CHUNKS) * 100));
+      }
+  };
+
   const handleSyncToServer = async () => {
       if (allChannels.length === 0) return;
-      
       setIsSyncing(true);
       setUploadProgress(0);
 
       try {
-          // 1. Check Server Health / Permissions
+          // 1. Check Health
           try {
-             const healthRes = await fetch('/api/health');
-             if (!healthRes.ok) throw new Error("Server storage is not accessible/writable.");
-          } catch (err) {
-             throw new Error("Cannot connect to server upload service. Check your connection or server permissions.");
+             const h = await fetch('/api/health');
+             if (!h.ok) throw new Error("Server storage not writable");
+          } catch (e) {
+             throw new Error("Server not reachable");
           }
 
-          const jsonString = JSON.stringify(allChannels);
-          let blob: Blob;
-          let isCompressed = false;
+          // 2. Try Compressed Upload
+          try {
+              await performUpload(allChannels, true);
+              setAutoConfigured(true);
+              alert("Sync successful!");
+          } catch (compressedErr: any) {
+              console.error("Compressed upload failed:", compressedErr);
+              
+              // 3. Fallback to Uncompressed
+              const retryUncompressed = window.confirm(
+                  `Compressed upload failed: ${compressedErr.message}\n\nRetry using slower uncompressed mode? (More reliable)`
+              );
 
-          // Attempt Compression
-          if ('CompressionStream' in window) {
-              try {
-                  const stream = new Blob([jsonString]).stream().pipeThrough(new CompressionStream('gzip'));
-                  blob = await new Response(stream).blob();
-                  isCompressed = true;
-                  console.log(`Compressed: ${(blob.size / 1024 / 1024).toFixed(2)}MB (Original: ${(jsonString.length / 1024 / 1024).toFixed(2)}MB)`);
-              } catch (e) {
-                  console.warn("Compression failed, falling back to raw", e);
-                  blob = new Blob([jsonString], { type: 'application/json' });
-              }
-          } else {
-              blob = new Blob([jsonString], { type: 'application/json' });
-          }
-          
-          const TOTAL_SIZE = blob.size;
-          const CHUNK_SIZE = 1 * 1024 * 1024; // 1MB Chunks
-          const TOTAL_CHUNKS = Math.ceil(TOTAL_SIZE / CHUNK_SIZE);
-          const UPLOAD_ID = Date.now().toString() + "_" + Math.floor(Math.random() * 1000);
-
-          console.log(`Starting Upload: ${TOTAL_SIZE} bytes in ${TOTAL_CHUNKS} chunks.`);
-
-          for (let i = 0; i < TOTAL_CHUNKS; i++) {
-              const start = i * CHUNK_SIZE;
-              const end = Math.min(start + CHUNK_SIZE, TOTAL_SIZE);
-              const chunk = blob.slice(start, end);
-
-              // Retry Logic
-              let attempts = 0;
-              let success = false;
-              let lastError;
-
-              while (attempts < 3 && !success) {
+              if (retryUncompressed) {
+                  setUploadProgress(0);
                   try {
-                      const res = await fetch(`/api/upload-chunk?id=${UPLOAD_ID}&index=${i}&total=${TOTAL_CHUNKS}&compressed=${isCompressed}`, {
-                          method: 'POST',
-                          headers: {
-                              'Content-Type': 'application/octet-stream'
-                          },
-                          body: chunk
-                      });
-
-                      if (!res.ok) {
-                          const txt = await res.text();
-                          throw new Error(`Status ${res.status}: ${txt}`);
-                      }
-                      success = true;
-                  } catch (e: any) {
-                      lastError = e;
-                      attempts++;
-                      console.warn(`Chunk ${i} failed (Attempt ${attempts}/3). Retrying...`);
-                      await new Promise(r => setTimeout(r, 1000 * Math.pow(2, attempts - 1)));
+                      await performUpload(allChannels, false);
+                      setAutoConfigured(true);
+                      alert("Sync successful (Uncompressed)!");
+                  } catch (rawErr: any) {
+                      throw new Error(`Uncompressed upload also failed: ${rawErr.message}`);
                   }
+              } else {
+                  throw compressedErr;
               }
-
-              if (!success) {
-                  throw new Error(`Failed to upload chunk ${i}. Last error: ${lastError?.message}`);
-              }
-
-              setUploadProgress(Math.round(((i + 1) / TOTAL_CHUNKS) * 100));
-              await new Promise(r => setTimeout(r, 50));
           }
-
-          setAutoConfigured(true);
-          alert("Sync successful! The library has been saved to the server.");
 
       } catch (e: any) {
           console.error(e);
-          const confirmLocal = window.confirm(
-              `Sync failed: ${e.message}\n\nDo you want to save a local backup file instead?`
-          );
-          if (confirmLocal) {
+          if (window.confirm(`Sync completely failed: ${e.message}\n\nSave local backup?`)) {
               handleExportData();
           }
       } finally {
@@ -353,11 +360,7 @@ const App: React.FC = () => {
   };
 
   const handleLogout = async () => {
-    const msg = autoConfigured 
-        ? "Reload content from server?" 
-        : "Are you sure you want to log out and clear all cached data?";
-        
-    if(window.confirm(msg)) {
+    if(window.confirm(autoConfigured ? "Reload content from server?" : "Log out and clear data?")) {
         setLoading(true);
         setShowSettings(false);
         await clearDB();
@@ -366,11 +369,8 @@ const App: React.FC = () => {
         setFeatured(null);
         setAllChannels([]);
         
-        if (autoConfigured) {
-             window.location.reload();
-        } else {
-            setLoading(false);
-        }
+        if (autoConfigured) window.location.reload();
+        else setLoading(false);
     }
   };
 
