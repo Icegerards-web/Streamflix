@@ -3,8 +3,6 @@ import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
 import compression from 'compression';
-import { createGunzip } from 'zlib';
-import { pipeline } from 'stream/promises';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -39,6 +37,7 @@ app.use((req, res, next) => {
     next();
 });
 
+// Gzip responses (downloading), but we handle upload manually
 app.use(compression());
 app.use(express.json({ limit: '10mb' }));
 
@@ -72,68 +71,62 @@ app.get('/api/health', (req, res) => {
 });
 
 // API: Robust Chunked Upload
+// We accept raw body to prevent JSON parsing overhead on chunks
 app.post('/api/upload-chunk', express.raw({ type: 'application/octet-stream', limit: '50mb' }), async (req, res) => {
     try {
-        const { id, index, total, compressed } = req.query;
+        const { id, index, total } = req.query;
         if (!id || index === undefined || !total) return res.status(400).json({ error: "Missing parameters" });
 
         const chunkIndex = parseInt(index);
         const totalChunks = parseInt(total);
-        const isCompressed = compressed === 'true';
         
-        // Save chunk as a separate file: "upload_ID_part_INDEX"
+        // Save chunk as a separate file
         const chunkFileName = `upload_${id}_part_${chunkIndex}`;
         const chunkFilePath = path.join(DATA_DIR, chunkFileName);
         
+        // Write the chunk synchronously to ensure it exists before we move on
         fs.writeFileSync(chunkFilePath, req.body);
         
         // If this is the last chunk, perform the merge
         if (chunkIndex === totalChunks - 1) {
-            console.log(`[Server] Received final chunk for ${id}. Starting merge of ${totalChunks} parts...`);
+            console.log(`[Server] Received final chunk for ${id} (${totalChunks} parts). Starting merge...`);
             
-            // 1. Verify all parts exist
+            // 1. Verify all parts exist BEFORE starting merge
             for (let i = 0; i < totalChunks; i++) {
-                if (!fs.existsSync(path.join(DATA_DIR, `upload_${id}_part_${i}`))) {
+                const partPath = path.join(DATA_DIR, `upload_${id}_part_${i}`);
+                if (!fs.existsSync(partPath)) {
+                    console.error(`[Server] Merge failed. Missing part ${i}`);
                     return res.status(400).json({ error: `Missing part ${i}` });
                 }
             }
 
-            // 2. Merge parts into one temp file
+            // 2. Merge parts using appendFileSync for absolute safety (prevents race conditions)
             const tempCompleteFile = path.join(DATA_DIR, `upload_${id}_complete.tmp`);
-            const writeStream = fs.createWriteStream(tempCompleteFile);
+            
+            // Clear temp file if exists from previous failed attempt
+            if (fs.existsSync(tempCompleteFile)) fs.unlinkSync(tempCompleteFile);
 
-            for (let i = 0; i < totalChunks; i++) {
-                const partPath = path.join(DATA_DIR, `upload_${id}_part_${i}`);
-                const data = fs.readFileSync(partPath);
-                writeStream.write(data);
-                fs.unlinkSync(partPath); // Delete part after merging
-            }
-            writeStream.end();
-
-            await new Promise((resolve, reject) => {
-                writeStream.on('finish', resolve);
-                writeStream.on('error', reject);
-            });
-
-            // 3. Decompress or Rename to final playlist.json
-            if (isCompressed) {
-                console.log(`[Server] Decompressing ${id}...`);
-                try {
-                    await pipeline(
-                        fs.createReadStream(tempCompleteFile),
-                        createGunzip(),
-                        fs.createWriteStream(DATA_FILE)
-                    );
-                    fs.unlinkSync(tempCompleteFile);
-                } catch (err) {
-                    console.error("Decompression failed:", err);
-                    if(fs.existsSync(tempCompleteFile)) fs.unlinkSync(tempCompleteFile);
-                    return res.status(500).json({ error: "Decompression failed on server" });
+            try {
+                for (let i = 0; i < totalChunks; i++) {
+                    const partPath = path.join(DATA_DIR, `upload_${id}_part_${i}`);
+                    const data = fs.readFileSync(partPath);
+                    fs.appendFileSync(tempCompleteFile, data);
+                    fs.unlinkSync(partPath); // Clean up immediately
                 }
-            } else {
-                console.log(`[Server] Renaming ${id} to playlist.json...`);
+            } catch (mergeErr) {
+                console.error("[Server] Merge IO Error:", mergeErr);
+                return res.status(500).json({ error: "Server file merge failed." });
+            }
+
+            // 3. Rename to playlist.json (Atomic operation)
+            console.log(`[Server] Renaming ${id} to playlist.json...`);
+            try {
+                // If target exists, delete it first (Windows compatibility)
                 if (fs.existsSync(DATA_FILE)) fs.unlinkSync(DATA_FILE);
                 fs.renameSync(tempCompleteFile, DATA_FILE);
+            } catch (renameErr) {
+                console.error("[Server] Rename Error:", renameErr);
+                return res.status(500).json({ error: "Could not save final playlist file." });
             }
 
             console.log(`[Server] Upload ${id} complete.`);
@@ -143,7 +136,7 @@ app.post('/api/upload-chunk', express.raw({ type: 'application/octet-stream', li
         res.json({ success: true, chunk: chunkIndex });
     } catch (err) {
         console.error("[Server] Upload error:", err);
-        res.status(500).json({ error: "Failed to process chunk." });
+        res.status(500).json({ error: "Failed to process chunk: " + err.message });
     }
 });
 

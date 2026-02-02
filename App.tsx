@@ -249,31 +249,17 @@ const App: React.FC = () => {
   };
 
   // --- UPLOAD LOGIC ---
-  const performUpload = async (channels: Channel[], useCompression: boolean) => {
+  const performUpload = async (channels: Channel[]) => {
       const jsonString = JSON.stringify(channels);
-      let blob: Blob;
-
-      if (useCompression && 'CompressionStream' in window) {
-          try {
-              const stream = new Blob([jsonString]).stream().pipeThrough(new CompressionStream('gzip'));
-              blob = await new Response(stream).blob();
-              console.log(`Compressed: ${(blob.size / 1024 / 1024).toFixed(2)}MB`);
-          } catch (e) {
-              console.warn("Compression failed, using raw JSON");
-              blob = new Blob([jsonString], { type: 'application/json' });
-              useCompression = false;
-          }
-      } else {
-          blob = new Blob([jsonString], { type: 'application/json' });
-          useCompression = false;
-      }
+      // Disable compression for reliability
+      const blob = new Blob([jsonString], { type: 'application/json' });
 
       const TOTAL_SIZE = blob.size;
-      const CHUNK_SIZE = 1 * 1024 * 1024; // 1MB
+      const CHUNK_SIZE = 2 * 1024 * 1024; // 2MB Chunks (Reduced overhead)
       const TOTAL_CHUNKS = Math.ceil(TOTAL_SIZE / CHUNK_SIZE);
       const UPLOAD_ID = Date.now().toString() + "_" + Math.floor(Math.random() * 1000);
 
-      console.log(`Uploading ${TOTAL_CHUNKS} chunks. Compressed: ${useCompression}`);
+      console.log(`Uploading ${TOTAL_CHUNKS} chunks. Size: ${(TOTAL_SIZE / 1024 / 1024).toFixed(2)} MB`);
 
       for (let i = 0; i < TOTAL_CHUNKS; i++) {
           const start = i * CHUNK_SIZE;
@@ -286,7 +272,8 @@ const App: React.FC = () => {
 
           while (attempts < 3 && !success) {
               try {
-                  const res = await fetch(`/api/upload-chunk?id=${UPLOAD_ID}&index=${i}&total=${TOTAL_CHUNKS}&compressed=${useCompression}`, {
+                  // No compressed param needed
+                  const res = await fetch(`/api/upload-chunk?id=${UPLOAD_ID}&index=${i}&total=${TOTAL_CHUNKS}`, {
                       method: 'POST',
                       headers: { 'Content-Type': 'application/octet-stream' },
                       body: chunk
@@ -321,36 +308,14 @@ const App: React.FC = () => {
              throw new Error("Server not reachable");
           }
 
-          // 2. Try Compressed Upload
-          try {
-              await performUpload(allChannels, true);
-              setAutoConfigured(true);
-              alert("Sync successful!");
-          } catch (compressedErr: any) {
-              console.error("Compressed upload failed:", compressedErr);
-              
-              // 3. Fallback to Uncompressed
-              const retryUncompressed = window.confirm(
-                  `Compressed upload failed: ${compressedErr.message}\n\nRetry using slower uncompressed mode? (More reliable)`
-              );
-
-              if (retryUncompressed) {
-                  setUploadProgress(0);
-                  try {
-                      await performUpload(allChannels, false);
-                      setAutoConfigured(true);
-                      alert("Sync successful (Uncompressed)!");
-                  } catch (rawErr: any) {
-                      throw new Error(`Uncompressed upload also failed: ${rawErr.message}`);
-                  }
-              } else {
-                  throw compressedErr;
-              }
-          }
+          // 2. Perform Standard Upload (Uncompressed)
+          await performUpload(allChannels);
+          setAutoConfigured(true);
+          alert("Sync successful!");
 
       } catch (e: any) {
           console.error(e);
-          if (window.confirm(`Sync completely failed: ${e.message}\n\nSave local backup?`)) {
+          if (window.confirm(`Sync failed: ${e.message}\n\nSave local backup?`)) {
               handleExportData();
           }
       } finally {
