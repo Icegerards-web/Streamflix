@@ -262,8 +262,8 @@ const App: React.FC = () => {
       try {
           // Use AbortController to timeout the request if server hangs
           const controller = new AbortController();
-          // INCREASED TIMEOUT TO 120 SECONDS (2 Minutes)
-          const timeoutId = setTimeout(() => controller.abort(), 120000); 
+          // INCREASED TIMEOUT TO 300 SECONDS (5 Minutes)
+          const timeoutId = setTimeout(() => controller.abort(), 300000); 
           
           const res = await fetch('/api/upload', {
               method: 'POST',

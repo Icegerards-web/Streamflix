@@ -11,6 +11,8 @@ export default defineConfig({
         target: 'http://127.0.0.1:1402',
         changeOrigin: true,
         secure: false,
+        timeout: 300000,
+        proxyTimeout: 300000
       },
       '/playlist.json': {
         target: 'http://127.0.0.1:1402',
@@ -27,6 +29,8 @@ export default defineConfig({
           target: 'http://127.0.0.1:1402',
           changeOrigin: true,
           secure: false,
+          timeout: 300000,
+          proxyTimeout: 300000
         },
         '/playlist.json': {
           target: 'http://127.0.0.1:1402',
