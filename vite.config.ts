@@ -8,12 +8,12 @@ export default defineConfig({
     host: true,
     proxy: {
       '/api': {
-        target: 'http://localhost:1402',
+        target: 'http://127.0.0.1:1402',
         changeOrigin: true,
         secure: false,
       },
       '/playlist.json': {
-        target: 'http://localhost:1402',
+        target: 'http://127.0.0.1:1402',
         changeOrigin: true,
         secure: false,
       }
@@ -24,12 +24,12 @@ export default defineConfig({
     host: true,
     proxy: {
         '/api': {
-          target: 'http://localhost:1402',
+          target: 'http://127.0.0.1:1402',
           changeOrigin: true,
           secure: false,
         },
         '/playlist.json': {
-          target: 'http://localhost:1402',
+          target: 'http://127.0.0.1:1402',
           changeOrigin: true,
           secure: false,
         }

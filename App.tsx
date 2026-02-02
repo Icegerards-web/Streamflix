@@ -44,17 +44,25 @@ const App: React.FC = () => {
                   pickFeatured(cached.allChannels);
                   setIsSetupComplete(true);
                   
-                  if (SERVER_CONFIG.url || await checkStaticFileExists()) setAutoConfigured(true);
+                  // Background check for server file
+                  checkStaticFileExists().then(exists => {
+                      if (exists || SERVER_CONFIG.url) setAutoConfigured(true);
+                  });
                   
                   setLoading(false);
                   setLoadingStatus('');
-                  // Background check for server update? Optional.
                   return;
               }
 
               // 2. Try Server-Hosted JSON (From "Sync to Server")
               try {
-                  const staticResponse = await fetch('playlist.json');
+                  // Add a timeout to prevent hanging if server is down
+                  const controller = new AbortController();
+                  const timeoutId = setTimeout(() => controller.abort(), 3000);
+                  
+                  const staticResponse = await fetch('playlist.json', { signal: controller.signal });
+                  clearTimeout(timeoutId);
+
                   if (staticResponse.ok) {
                       setLoadingStatus('Downloading server content...');
                       const staticData = await staticResponse.json();
@@ -68,7 +76,7 @@ const App: React.FC = () => {
                       }
                   }
               } catch (e) {
-                  console.log("No static playlist.json found, continuing...");
+                  console.log("No static playlist.json found or server unreachable, continuing...");
               }
 
               // 3. If no cache and no static file, check Server Config (Auto-Connect to IPTV)
@@ -91,7 +99,13 @@ const App: React.FC = () => {
 
   const checkStaticFileExists = async () => {
       try {
-          const res = await fetch('playlist.json', { method: 'HEAD' });
+          const controller = new AbortController();
+          const timeoutId = setTimeout(() => controller.abort(), 2000);
+          const res = await fetch('playlist.json', { 
+              method: 'HEAD', 
+              signal: controller.signal 
+          });
+          clearTimeout(timeoutId);
           return res.ok;
       } catch { return false; }
   };
@@ -246,21 +260,32 @@ const App: React.FC = () => {
       
       setIsSyncing(true);
       try {
+          // Use AbortController to timeout the request if server hangs
+          const controller = new AbortController();
+          const timeoutId = setTimeout(() => controller.abort(), 10000); // 10s timeout
+          
           const res = await fetch('/api/upload', {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify(allChannels)
+              body: JSON.stringify(allChannels),
+              signal: controller.signal
           });
+          clearTimeout(timeoutId);
           
           if (res.ok) {
               setAutoConfigured(true);
               alert("Sync successful! Open StreamFlix on your iPad or TV, and it will load this content automatically.");
           } else {
-              alert("Sync failed. The server might be read-only or unreachable.");
+              throw new Error("Server returned " + res.status);
           }
       } catch (e) {
           console.error(e);
-          alert("Network error during sync.");
+          const confirmLocal = window.confirm(
+              "Sync failed (Server unreachable). Would you like to save a local Backup file instead?"
+          );
+          if (confirmLocal) {
+              handleExportData();
+          }
       } finally {
           setIsSyncing(false);
       }
