@@ -1,4 +1,4 @@
-import React, { useRef } from 'react';
+import React, { useRef, useState, useEffect } from 'react';
 
 interface SettingsMenuProps {
   isOpen: boolean;
@@ -22,6 +22,38 @@ const SettingsMenu: React.FC<SettingsMenuProps> = ({
   isOpen, onClose, stats, onExport, onImport, onSync, onLogout, isAutoConfig, isSyncing, uploadProgress = 0
 }) => {
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const [serverHealth, setServerHealth] = useState<'checking' | 'online' | 'offline' | 'readonly'>('checking');
+  const [healthMsg, setHealthMsg] = useState('Checking connection...');
+
+  // Check server health whenever menu opens
+  useEffect(() => {
+    if (isOpen) {
+        checkServer();
+    }
+  }, [isOpen]);
+
+  const checkServer = async () => {
+      setServerHealth('checking');
+      setHealthMsg('Pinging server...');
+      try {
+          const controller = new AbortController();
+          const id = setTimeout(() => controller.abort(), 3000); // 3s timeout
+          
+          const res = await fetch('/api/health', { signal: controller.signal });
+          clearTimeout(id);
+
+          if (res.ok) {
+              setServerHealth('online');
+              setHealthMsg('Online & Writable');
+          } else {
+              setServerHealth('readonly');
+              setHealthMsg(`Error: ${res.status} ${res.statusText}`);
+          }
+      } catch (e) {
+          setServerHealth('offline');
+          setHealthMsg('Server Unreachable');
+      }
+  };
 
   if (!isOpen) return null;
 
@@ -44,7 +76,29 @@ const SettingsMenu: React.FC<SettingsMenuProps> = ({
           </svg>
         </button>
 
-        <h2 className="text-2xl font-bold text-white mb-6">Settings</h2>
+        <div className="flex items-center gap-3 mb-6">
+            <h2 className="text-2xl font-bold text-white">Settings</h2>
+            
+            {/* Server Status Badge */}
+            <div 
+                className={`flex items-center gap-2 px-3 py-1 rounded-full text-xs font-bold border ${
+                    serverHealth === 'online' ? 'bg-green-900/30 border-green-800 text-green-400' :
+                    serverHealth === 'checking' ? 'bg-blue-900/30 border-blue-800 text-blue-400' :
+                    'bg-red-900/30 border-red-800 text-red-400'
+                }`}
+                title={healthMsg}
+            >
+                <div className={`w-2 h-2 rounded-full ${
+                    serverHealth === 'online' ? 'bg-green-500 shadow-[0_0_5px_#22c55e]' :
+                    serverHealth === 'checking' ? 'bg-blue-500 animate-pulse' :
+                    'bg-red-500'
+                }`}></div>
+                <span className="max-w-[120px] truncate">{healthMsg}</span>
+                {serverHealth === 'offline' && (
+                    <button onClick={checkServer} className="ml-1 hover:text-white">↻</button>
+                )}
+            </div>
+        </div>
 
         <div className="space-y-6">
           {/* Stats Section */}
@@ -84,8 +138,12 @@ const SettingsMenu: React.FC<SettingsMenuProps> = ({
              <div className="w-full">
                 <button 
                     onClick={onSync}
-                    disabled={isSyncing}
-                    className="w-full bg-red-600 hover:bg-red-700 text-white font-bold py-3 rounded flex items-center justify-center gap-2 transition text-sm shadow-lg shadow-red-900/20 disabled:opacity-50"
+                    disabled={isSyncing || serverHealth !== 'online'}
+                    className={`w-full font-bold py-3 rounded flex items-center justify-center gap-2 transition text-sm shadow-lg ${
+                        serverHealth === 'online' 
+                            ? 'bg-red-600 hover:bg-red-700 text-white shadow-red-900/20' 
+                            : 'bg-gray-800 text-gray-500 cursor-not-allowed'
+                    }`}
                 >
                     {isSyncing ? (
                         <div className="w-5 h-5 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
@@ -97,6 +155,12 @@ const SettingsMenu: React.FC<SettingsMenuProps> = ({
                     {isSyncing ? "Uploading..." : "Upload to Server"}
                 </button>
                 
+                {serverHealth !== 'online' && !isSyncing && (
+                    <p className="text-[10px] text-red-400 text-center mt-1">
+                        Server unreachable. Check backend/VPN.
+                    </p>
+                )}
+
                 {/* PROGRESS BAR */}
                 {isSyncing && (
                     <div className="w-full bg-gray-700 rounded-full h-2.5 mt-2">
