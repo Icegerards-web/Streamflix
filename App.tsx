@@ -252,7 +252,7 @@ const App: React.FC = () => {
       reader.readAsText(file);
   };
 
-  // --- COMPRESSED CHUNK UPLOAD (FIXED FOR TIMEOUTS) ---
+  // --- COMPRESSED CHUNK UPLOAD WITH HEALTH CHECK ---
   const handleSyncToServer = async () => {
       if (allChannels.length === 0) return;
       
@@ -260,11 +260,19 @@ const App: React.FC = () => {
       setUploadProgress(0);
 
       try {
+          // 1. Check Server Health / Permissions
+          try {
+             const healthRes = await fetch('/api/health');
+             if (!healthRes.ok) throw new Error("Server storage is not accessible/writable.");
+          } catch (err) {
+             throw new Error("Cannot connect to server upload service. Check your connection or server permissions.");
+          }
+
           const jsonString = JSON.stringify(allChannels);
           let blob: Blob;
           let isCompressed = false;
 
-          // Attempt Compression (Reduces size by ~90%, preventing timeouts)
+          // Attempt Compression
           if ('CompressionStream' in window) {
               try {
                   const stream = new Blob([jsonString]).stream().pipeThrough(new CompressionStream('gzip'));
@@ -272,7 +280,7 @@ const App: React.FC = () => {
                   isCompressed = true;
                   console.log(`Compressed: ${(blob.size / 1024 / 1024).toFixed(2)}MB (Original: ${(jsonString.length / 1024 / 1024).toFixed(2)}MB)`);
               } catch (e) {
-                  console.warn("Compression failed, falling back to raw upload", e);
+                  console.warn("Compression failed, falling back to raw", e);
                   blob = new Blob([jsonString], { type: 'application/json' });
               }
           } else {
@@ -280,7 +288,7 @@ const App: React.FC = () => {
           }
           
           const TOTAL_SIZE = blob.size;
-          const CHUNK_SIZE = 1 * 1024 * 1024; // 1MB Chunks (Small enough for any gateway)
+          const CHUNK_SIZE = 1 * 1024 * 1024; // 1MB Chunks
           const TOTAL_CHUNKS = Math.ceil(TOTAL_SIZE / CHUNK_SIZE);
           const UPLOAD_ID = Date.now().toString() + "_" + Math.floor(Math.random() * 1000);
 
@@ -291,7 +299,7 @@ const App: React.FC = () => {
               const end = Math.min(start + CHUNK_SIZE, TOTAL_SIZE);
               const chunk = blob.slice(start, end);
 
-              // Retry Logic: Try 3 times per chunk
+              // Retry Logic
               let attempts = 0;
               let success = false;
               let lastError;
@@ -307,14 +315,15 @@ const App: React.FC = () => {
                       });
 
                       if (!res.ok) {
-                          throw new Error(`Status ${res.status}`);
+                          const txt = await res.text();
+                          throw new Error(`Status ${res.status}: ${txt}`);
                       }
                       success = true;
                   } catch (e: any) {
                       lastError = e;
                       attempts++;
                       console.warn(`Chunk ${i} failed (Attempt ${attempts}/3). Retrying...`);
-                      await new Promise(r => setTimeout(r, 500 * Math.pow(2, attempts - 1)));
+                      await new Promise(r => setTimeout(r, 1000 * Math.pow(2, attempts - 1)));
                   }
               }
 
@@ -323,18 +332,16 @@ const App: React.FC = () => {
               }
 
               setUploadProgress(Math.round(((i + 1) / TOTAL_CHUNKS) * 100));
-              
-              // Slight throttle to keep server happy
-              await new Promise(r => setTimeout(r, 20));
+              await new Promise(r => setTimeout(r, 50));
           }
 
           setAutoConfigured(true);
-          alert("Sync successful! The library has been compressed and saved to the server.");
+          alert("Sync successful! The library has been saved to the server.");
 
       } catch (e: any) {
           console.error(e);
           const confirmLocal = window.confirm(
-              `Sync failed (${e.message}). Save local backup instead?`
+              `Sync failed: ${e.message}\n\nDo you want to save a local backup file instead?`
           );
           if (confirmLocal) {
               handleExportData();
