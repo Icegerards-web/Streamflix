@@ -34,22 +34,35 @@ const SettingsMenu: React.FC<SettingsMenuProps> = ({
 
   const checkServer = async () => {
       setServerHealth('checking');
-      setHealthMsg('Pinging server...');
+      setHealthMsg('Connecting...');
+      
       try {
           const controller = new AbortController();
-          const id = setTimeout(() => controller.abort(), 3000); // 3s timeout
+          const id = setTimeout(() => controller.abort(), 5000); // 5s timeout
           
-          const res = await fetch('/api/health', { signal: controller.signal });
+          // 1. Try Simple Ping first (Lightweight)
+          const pingRes = await fetch('/api/ping', { signal: controller.signal });
           clearTimeout(id);
 
-          if (res.ok) {
+          if (!pingRes.ok) {
+               throw new Error(`Ping failed (${pingRes.status})`);
+          }
+
+          // 2. Try Storage Check (Write Access)
+          const healthRes = await fetch('/api/health');
+          const healthData = await healthRes.json();
+
+          if (healthData.writable) {
               setServerHealth('online');
               setHealthMsg('Online & Writable');
           } else {
               setServerHealth('readonly');
-              setHealthMsg(`Error: ${res.status} ${res.statusText}`);
+              setHealthMsg('Storage Read-Only');
+              console.warn("Server connected but storage is read-only:", healthData);
           }
-      } catch (e) {
+
+      } catch (e: any) {
+          console.error("Connection Check Failed:", e);
           setServerHealth('offline');
           setHealthMsg('Server Unreachable');
       }
@@ -84,6 +97,7 @@ const SettingsMenu: React.FC<SettingsMenuProps> = ({
                 className={`flex items-center gap-2 px-3 py-1 rounded-full text-xs font-bold border ${
                     serverHealth === 'online' ? 'bg-green-900/30 border-green-800 text-green-400' :
                     serverHealth === 'checking' ? 'bg-blue-900/30 border-blue-800 text-blue-400' :
+                    serverHealth === 'readonly' ? 'bg-yellow-900/30 border-yellow-800 text-yellow-400' :
                     'bg-red-900/30 border-red-800 text-red-400'
                 }`}
                 title={healthMsg}
@@ -91,11 +105,12 @@ const SettingsMenu: React.FC<SettingsMenuProps> = ({
                 <div className={`w-2 h-2 rounded-full ${
                     serverHealth === 'online' ? 'bg-green-500 shadow-[0_0_5px_#22c55e]' :
                     serverHealth === 'checking' ? 'bg-blue-500 animate-pulse' :
+                    serverHealth === 'readonly' ? 'bg-yellow-500' :
                     'bg-red-500'
                 }`}></div>
                 <span className="max-w-[120px] truncate">{healthMsg}</span>
                 {serverHealth === 'offline' && (
-                    <button onClick={checkServer} className="ml-1 hover:text-white">↻</button>
+                    <button onClick={checkServer} className="ml-1 hover:text-white" title="Retry Connection">↻</button>
                 )}
             </div>
         </div>
@@ -155,9 +170,14 @@ const SettingsMenu: React.FC<SettingsMenuProps> = ({
                     {isSyncing ? "Uploading..." : "Upload to Server"}
                 </button>
                 
-                {serverHealth !== 'online' && !isSyncing && (
+                {serverHealth === 'offline' && (
                     <p className="text-[10px] text-red-400 text-center mt-1">
-                        Server unreachable. Check backend/VPN.
+                        Cannot connect. Check if server is running on port 1402.
+                    </p>
+                )}
+                {serverHealth === 'readonly' && (
+                    <p className="text-[10px] text-yellow-500 text-center mt-1">
+                        Server connected but 'data' folder is not writable.
                     </p>
                 )}
 

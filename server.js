@@ -15,26 +15,30 @@ const DATA_DIR = path.join(__dirname, 'data');
 const DATA_FILE = path.join(DATA_DIR, 'playlist.json');
 
 // --- ROBUST STARTUP & PERMISSIONS ---
-try {
-    if (!fs.existsSync(DATA_DIR)) {
-        fs.mkdirSync(DATA_DIR, { recursive: true });
-        console.log(`[Server] Created data directory: ${DATA_DIR}`);
-    }
-    // Attempt to loosen permissions to ensure Docker/Host compatibility
+// We wraps this in a function to not block main execution flow critically
+const ensureDataDir = () => {
     try {
-        fs.chmodSync(DATA_DIR, 0o777);
-        console.log(`[Server] Set permissions 777 on data directory.`);
-    } catch (e) {
-        console.warn(`[Server] Could not chmod data directory (might be Windows or restricted):`, e.message);
+        if (!fs.existsSync(DATA_DIR)) {
+            fs.mkdirSync(DATA_DIR, { recursive: true });
+            console.log(`[Server] Created data directory: ${DATA_DIR}`);
+        }
+        // Attempt to loosen permissions (0o777)
+        try {
+            fs.chmodSync(DATA_DIR, 0o777);
+            console.log(`[Server] Set permissions 777 on data directory.`);
+        } catch (e) {
+            console.warn(`[Server] Note: Could not chmod data directory (OS restriction?): ${e.message}`);
+        }
+    } catch (err) {
+        console.error(`[Server] ERROR: Could not access data directory. Uploads may fail.`, err);
     }
-} catch (err) {
-    console.error(`[Server] CRITICAL ERROR: Could not create or access data directory.`, err);
-}
+};
+ensureDataDir();
 
 app.use(compression());
 app.use(express.json({ limit: '10mb' }));
 
-// CORS Middleware
+// CORS Middleware (Very Permissive)
 app.use((req, res, next) => {
     res.header("Access-Control-Allow-Origin", "*");
     res.header("Access-Control-Allow-Headers", "Origin, X-Requested-With, Content-Type, Accept, x-upload-id, x-chunk-index, x-total-chunks");
@@ -47,7 +51,12 @@ app.use((req, res, next) => {
 
 app.use(express.static(path.join(__dirname, 'dist')));
 
-// API: Health / Write Check
+// API: Simple Ping (No Disk I/O) - checks if server is reachable
+app.get('/api/ping', (req, res) => {
+    res.json({ status: 'pong' });
+});
+
+// API: Health / Write Check - checks if server can write to disk
 app.get('/api/health', (req, res) => {
     try {
         const testFile = path.join(DATA_DIR, 'write_test.tmp');
@@ -56,11 +65,12 @@ app.get('/api/health', (req, res) => {
         res.json({ status: 'ok', writable: true });
     } catch (e) {
         console.error("Health Check Failed:", e);
-        res.status(500).json({ status: 'error', error: 'Storage not writable', details: e.message });
+        // We return 200 but with writable: false so the UI knows it's connected but broken
+        res.json({ status: 'error', writable: false, error: e.message });
     }
 });
 
-// API: Chunked Upload Handler (Synchronous Version for Reliability)
+// API: Chunked Upload Handler
 app.post('/api/upload-chunk', express.raw({ type: 'application/octet-stream', limit: '50mb' }), async (req, res) => {
     try {
         const { id, index, total, compressed } = req.query;
@@ -74,9 +84,8 @@ app.post('/api/upload-chunk', express.raw({ type: 'application/octet-stream', li
         const isCompressed = compressed === 'true';
         const tempFileName = `temp_upload_${id}.${isCompressed ? 'gz' : 'json'}`;
         const tempFilePath = path.join(DATA_DIR, tempFileName);
-        const chunkData = req.body; // Buffer
+        const chunkData = req.body; 
 
-        // Use Synchronous operations to prevent Event Loop hangs on simple file IO
         if (chunkIndex === 0) {
             fs.writeFileSync(tempFilePath, chunkData);
         } else {
@@ -89,14 +98,13 @@ app.post('/api/upload-chunk', express.raw({ type: 'application/octet-stream', li
             console.log(`[Server] Finalizing upload ${id}...`);
             
             if (isCompressed) {
-                // Decompression still needs streams, but we wrap in try/catch block carefully
                 try {
                     await pipeline(
                         fs.createReadStream(tempFilePath),
                         createGunzip(),
                         fs.createWriteStream(DATA_FILE)
                     );
-                    fs.unlinkSync(tempFilePath); // Sync unlink
+                    fs.unlinkSync(tempFilePath); 
                 } catch (streamErr) {
                     console.error("Decompression failed:", streamErr);
                     return res.status(500).json({ error: "Decompression failed on server" });
