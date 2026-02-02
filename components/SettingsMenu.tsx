@@ -15,10 +15,11 @@ interface SettingsMenuProps {
   onLogout: () => void;
   isAutoConfig: boolean;
   isSyncing: boolean;
+  uploadProgress?: number;
 }
 
 const SettingsMenu: React.FC<SettingsMenuProps> = ({ 
-  isOpen, onClose, stats, onExport, onImport, onSync, onLogout, isAutoConfig, isSyncing 
+  isOpen, onClose, stats, onExport, onImport, onSync, onLogout, isAutoConfig, isSyncing, uploadProgress = 0
 }) => {
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -80,20 +81,30 @@ const SettingsMenu: React.FC<SettingsMenuProps> = ({
              />
 
              {/* SERVER SYNC BUTTON */}
-             <button 
-                onClick={onSync}
-                disabled={isSyncing}
-                className="w-full bg-red-600 hover:bg-red-700 text-white font-bold py-3 rounded flex items-center justify-center gap-2 transition text-sm shadow-lg shadow-red-900/20"
-             >
-                {isSyncing ? (
-                    <div className="w-5 h-5 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
-                ) : (
-                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-5 h-5">
-                        <path strokeLinecap="round" strokeLinejoin="round" d="M12 16.5V9.75m0 0 3 3m-3-3-3 3M6.75 19.5a4.5 4.5 0 0 1-1.41-8.775 5.25 5.25 0 0 1 10.233-2.33 3 3 0 0 1 3.758 3.848A3.752 3.752 0 0 1 18 19.5H6.75Z" />
-                    </svg>
+             <div className="w-full">
+                <button 
+                    onClick={onSync}
+                    disabled={isSyncing}
+                    className="w-full bg-red-600 hover:bg-red-700 text-white font-bold py-3 rounded flex items-center justify-center gap-2 transition text-sm shadow-lg shadow-red-900/20 disabled:opacity-50"
+                >
+                    {isSyncing ? (
+                        <div className="w-5 h-5 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
+                    ) : (
+                        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-5 h-5">
+                            <path strokeLinecap="round" strokeLinejoin="round" d="M12 16.5V9.75m0 0 3 3m-3-3-3 3M6.75 19.5a4.5 4.5 0 0 1-1.41-8.775 5.25 5.25 0 0 1 10.233-2.33 3 3 0 0 1 3.758 3.848A3.752 3.752 0 0 1 18 19.5H6.75Z" />
+                        </svg>
+                    )}
+                    {isSyncing ? "Uploading..." : "Upload to Server"}
+                </button>
+                
+                {/* PROGRESS BAR */}
+                {isSyncing && (
+                    <div className="w-full bg-gray-700 rounded-full h-2.5 mt-2">
+                        <div className="bg-red-600 h-2.5 rounded-full transition-all duration-300" style={{ width: `${uploadProgress}%` }}></div>
+                    </div>
                 )}
-                {isSyncing ? "Uploading..." : "Upload to Server"}
-             </button>
+             </div>
+
              <p className="text-[10px] text-gray-500 text-center -mt-1 mb-2">
                  Syncs your library to this server ({window.location.host}) so other devices can see it.
              </p>

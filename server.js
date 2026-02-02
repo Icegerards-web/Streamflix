@@ -18,11 +18,13 @@ if (!fs.existsSync(DATA_DIR)) {
 }
 
 app.use(compression());
+// Keep json support for other potential endpoints, but limit is less relevant for chunks
+app.use(express.json({ limit: '10mb' }));
 
 // CORS Middleware
 app.use((req, res, next) => {
     res.header("Access-Control-Allow-Origin", "*");
-    res.header("Access-Control-Allow-Headers", "Origin, X-Requested-With, Content-Type, Accept");
+    res.header("Access-Control-Allow-Headers", "Origin, X-Requested-With, Content-Type, Accept, x-upload-id, x-chunk-index, x-total-chunks");
     res.header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
     if (req.method === 'OPTIONS') {
         return res.sendStatus(200);
@@ -33,25 +35,45 @@ app.use((req, res, next) => {
 // Serve Static Assets
 app.use(express.static(path.join(__dirname, 'dist')));
 
-// API: Save Playlist - OPTIMIZED
-// We use express.raw to get the buffer directly. 
-// This avoids parsing 500MB of JSON into an object and back to string (which causes timeouts).
-app.post('/api/upload', express.raw({ type: 'application/json', limit: '500mb' }), async (req, res) => {
+// API: Chunked Upload Handler
+// Accepts raw binary data for each chunk
+app.post('/api/upload-chunk', express.raw({ type: 'application/octet-stream', limit: '50mb' }), async (req, res) => {
     try {
-        const buffer = req.body;
+        const { id, index, total } = req.query;
         
-        if (!buffer || buffer.length === 0) {
-            return res.status(400).json({ error: "Empty body" });
+        if (!id || index === undefined || !total) {
+            return res.status(400).json({ error: "Missing upload parameters (id, index, total)" });
         }
+
+        const chunkIndex = parseInt(index as string);
+        const totalChunks = parseInt(total as string);
+        const tempFilePath = path.join(DATA_DIR, `temp_upload_${id}.json`);
         
-        // Write the buffer directly to disk
-        await fs.promises.writeFile(DATA_FILE, buffer);
-        
-        console.log(`[Server] Saved playlist (${(buffer.length / 1024 / 1024).toFixed(2)} MB) to ${DATA_FILE}`);
-        res.json({ success: true, size: buffer.length });
+        // chunk data is in req.body because of express.raw()
+        const chunkData = req.body;
+
+        if (chunkIndex === 0) {
+            // First chunk: Create/Overwrite the temp file
+            await fs.promises.writeFile(tempFilePath, chunkData);
+        } else {
+            // Subsequent chunks: Append
+            await fs.promises.appendFile(tempFilePath, chunkData);
+        }
+
+        console.log(`[Server] Processed chunk ${chunkIndex + 1}/${totalChunks} for upload ${id}`);
+
+        // Check if finished
+        if (chunkIndex === totalChunks - 1) {
+            // Move temp file to final destination
+            await fs.promises.rename(tempFilePath, DATA_FILE);
+            console.log(`[Server] Upload ${id} complete. Playlist updated.`);
+            return res.json({ success: true, complete: true });
+        }
+
+        res.json({ success: true, chunk: chunkIndex });
     } catch (err) {
-        console.error("[Server] Save error:", err);
-        res.status(500).json({ error: "Failed to save file." });
+        console.error("[Server] Upload error:", err);
+        res.status(500).json({ error: "Failed to process chunk." });
     }
 });
 
@@ -81,13 +103,7 @@ app.get('*', (req, res) => {
     }
 });
 
-// Listen with extended timeout
-const server = app.listen(PORT, '0.0.0.0', () => {
+app.listen(PORT, '0.0.0.0', () => {
     console.log(`StreamFlix Server running on port ${PORT}`);
     console.log(`Data Storage: ${DATA_FILE}`);
 });
-
-// Set server timeout to 5 minutes (300,000 ms) to match Nginx
-server.setTimeout(300000);
-server.keepAliveTimeout = 300000;
-server.headersTimeout = 301000;

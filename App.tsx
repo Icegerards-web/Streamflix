@@ -26,6 +26,7 @@ const App: React.FC = () => {
   const [showSettings, setShowSettings] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [isSyncing, setIsSyncing] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState(0);
 
   // --- PERSISTENCE & AUTO-CONFIG ---
   useEffect(() => {
@@ -56,7 +57,6 @@ const App: React.FC = () => {
 
               // 2. Try Server-Hosted JSON (From "Sync to Server")
               try {
-                  // Add a timeout to prevent hanging if server is down
                   const controller = new AbortController();
                   const timeoutId = setTimeout(() => controller.abort(), 5000); // 5s fast check for load
                   
@@ -110,7 +110,6 @@ const App: React.FC = () => {
       } catch { return false; }
   };
 
-  // Called when M3U is loaded OR Static JSON is loaded
   const processPlaylistData = async (channels: Channel[]) => {
     const { categories: cats } = categorizeChannels(channels);
     setCategories(cats);
@@ -120,7 +119,6 @@ const App: React.FC = () => {
     await saveToDB(cats, channels);
   };
 
-  // Called incrementally when Xtream chunks arrive
   const handleChunkLoaded = useCallback((newChannels: Channel[]) => {
       setAllChannels(prev => {
           const updated = [...prev, ...newChannels];
@@ -254,41 +252,61 @@ const App: React.FC = () => {
       reader.readAsText(file);
   };
 
-  // --- NEW: SYNC TO SERVER ---
+  // --- REBUILT SYNC: CHUNKED UPLOAD ---
   const handleSyncToServer = async () => {
       if (allChannels.length === 0) return;
       
       setIsSyncing(true);
+      setUploadProgress(0);
+
       try {
-          // Use AbortController to timeout the request if server hangs
-          const controller = new AbortController();
-          // INCREASED TIMEOUT TO 300 SECONDS (5 Minutes)
-          const timeoutId = setTimeout(() => controller.abort(), 300000); 
+          // 1. Convert data to Blob (Handles large data better than string)
+          const jsonString = JSON.stringify(allChannels);
+          const blob = new Blob([jsonString], { type: 'application/json' });
           
-          const res = await fetch('/api/upload', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify(allChannels),
-              signal: controller.signal
-          });
-          clearTimeout(timeoutId);
-          
-          if (res.ok) {
-              setAutoConfigured(true);
-              alert("Sync successful! Open StreamFlix on your iPad or TV, and it will load this content automatically.");
-          } else {
-              throw new Error("Server returned " + res.status);
+          const TOTAL_SIZE = blob.size;
+          const CHUNK_SIZE = 5 * 1024 * 1024; // 5MB chunks
+          const TOTAL_CHUNKS = Math.ceil(TOTAL_SIZE / CHUNK_SIZE);
+          const UPLOAD_ID = Date.now().toString() + "_" + Math.floor(Math.random() * 1000);
+
+          console.log(`Starting Upload: ${TOTAL_SIZE} bytes in ${TOTAL_CHUNKS} chunks.`);
+
+          for (let i = 0; i < TOTAL_CHUNKS; i++) {
+              const start = i * CHUNK_SIZE;
+              const end = Math.min(start + CHUNK_SIZE, TOTAL_SIZE);
+              const chunk = blob.slice(start, end);
+
+              // Upload chunk
+              const res = await fetch(`/api/upload-chunk?id=${UPLOAD_ID}&index=${i}&total=${TOTAL_CHUNKS}`, {
+                  method: 'POST',
+                  headers: {
+                      'Content-Type': 'application/octet-stream'
+                  },
+                  body: chunk
+              });
+
+              if (!res.ok) {
+                  throw new Error(`Chunk ${i} failed with status ${res.status}`);
+              }
+
+              // Update progress UI
+              setUploadProgress(Math.round(((i + 1) / TOTAL_CHUNKS) * 100));
           }
-      } catch (e) {
+
+          setAutoConfigured(true);
+          alert("Sync successful! Open StreamFlix on your iPad or TV to load this library.");
+
+      } catch (e: any) {
           console.error(e);
           const confirmLocal = window.confirm(
-              "Sync failed (Server unreachable or Timeout). Would you like to save a local Backup file instead?"
+              `Sync failed (${e.message}). Save local backup instead?`
           );
           if (confirmLocal) {
               handleExportData();
           }
       } finally {
           setIsSyncing(false);
+          setUploadProgress(0);
       }
   };
 
@@ -330,21 +348,16 @@ const App: React.FC = () => {
     const result: Category[] = [];
     const query = searchQuery.toLowerCase().trim();
     
-    // Helper to check if string matches query
     const matches = (str: string) => str.toLowerCase().includes(query);
 
     for (const cat of categories) {
-        // 1. View Filter
         let channelsInCat = cat.channels.filter(c => c.contentType === targetType);
         
-        // 2. Search Filter
         if (query) {
              channelsInCat = channelsInCat.filter(c => matches(c.name) || matches(c.group || ''));
         }
         
         if (channelsInCat.length > 0) {
-            // 3. Language Filter (Keep active unless searching specific things, usually better to ignore lang if searching)
-            // If searching, we relax the language filter to find content in other langs
             if (query || currentLanguage === 'All' || cat.language === currentLanguage) {
                 result.push({ ...cat, channels: channelsInCat });
             }
@@ -353,7 +366,6 @@ const App: React.FC = () => {
     return result;
   }, [categories, currentView, currentLanguage, searchQuery]);
 
-  // Pagination for infinite scroll effect (simple slice for now)
   const visibleCategories = filteredCategories.slice(0, 50);
 
   if (!isSetupComplete && !loading) {
@@ -371,7 +383,6 @@ const App: React.FC = () => {
   if (loading && !isSetupComplete) {
       return (
         <div className="min-h-screen bg-black flex flex-col items-center justify-center relative overflow-hidden">
-             {/* Use CSS Gradient instead of external image to prevent 404s */}
              <div className="absolute inset-0 bg-gradient-to-br from-gray-900 to-black"></div>
              
              <div className="z-10 text-center p-8">
@@ -398,7 +409,6 @@ const App: React.FC = () => {
         onSearchChange={setSearchQuery}
       />
       
-      {/* Settings Modal */}
       <SettingsMenu 
         isOpen={showSettings}
         onClose={() => setShowSettings(false)}
@@ -409,9 +419,9 @@ const App: React.FC = () => {
         onLogout={handleLogout}
         isAutoConfig={autoConfigured}
         isSyncing={isSyncing}
+        uploadProgress={uploadProgress}
       />
       
-      {/* Hero only on Home and when not searching */}
       {currentView === 'home' && featured && !searchQuery && <Hero channel={featured} onPlay={setCurrentChannel} />}
       
       <div className={`${currentView === 'home' && !searchQuery ? '-mt-16' : 'mt-24'} relative z-10 pb-20`}>
