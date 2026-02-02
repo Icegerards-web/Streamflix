@@ -25,7 +25,6 @@ const SettingsMenu: React.FC<SettingsMenuProps> = ({
   const [serverHealth, setServerHealth] = useState<'checking' | 'online' | 'offline' | 'readonly'>('checking');
   const [healthMsg, setHealthMsg] = useState('Checking connection...');
 
-  // Check server health whenever menu opens
   useEffect(() => {
     if (isOpen) {
         checkServer();
@@ -34,37 +33,46 @@ const SettingsMenu: React.FC<SettingsMenuProps> = ({
 
   const checkServer = async () => {
       setServerHealth('checking');
-      setHealthMsg('Connecting...');
+      setHealthMsg('Ping...');
       
       try {
           const controller = new AbortController();
-          const id = setTimeout(() => controller.abort(), 5000); // 5s timeout
+          const id = setTimeout(() => controller.abort(), 8000); 
           
-          // 1. Try Simple Ping first (Lightweight)
+          // 1. Ping Check
           const pingRes = await fetch('/api/ping', { signal: controller.signal });
           clearTimeout(id);
 
-          if (!pingRes.ok) {
-               throw new Error(`Ping failed (${pingRes.status})`);
+          if (!pingRes.ok) throw new Error(`Status: ${pingRes.status} ${pingRes.statusText}`);
+
+          // Critical: Check if we actually got JSON (and not HTML/Index page)
+          const contentType = pingRes.headers.get('content-type');
+          if (!contentType || !contentType.includes('application/json')) {
+              throw new Error("Invalid API Response (Likely HTML)");
           }
 
-          // 2. Try Storage Check (Write Access)
+          // 2. Health/Write Check
           const healthRes = await fetch('/api/health');
           const healthData = await healthRes.json();
 
           if (healthData.writable) {
               setServerHealth('online');
-              setHealthMsg('Online & Writable');
+              setHealthMsg('Connected');
           } else {
               setServerHealth('readonly');
-              setHealthMsg('Storage Read-Only');
-              console.warn("Server connected but storage is read-only:", healthData);
+              setHealthMsg('Read-Only');
           }
 
       } catch (e: any) {
           console.error("Connection Check Failed:", e);
           setServerHealth('offline');
-          setHealthMsg('Server Unreachable');
+          // Shorten common error messages for the UI badge
+          let msg = e.message;
+          if (msg.includes('Failed to fetch')) msg = 'Network Error';
+          if (msg.includes('AbortError')) msg = 'Timeout';
+          if (msg.includes('HTML')) msg = 'API Route Missing';
+          
+          setHealthMsg(msg);
       }
   };
 
@@ -108,15 +116,14 @@ const SettingsMenu: React.FC<SettingsMenuProps> = ({
                     serverHealth === 'readonly' ? 'bg-yellow-500' :
                     'bg-red-500'
                 }`}></div>
-                <span className="max-w-[120px] truncate">{healthMsg}</span>
+                <span className="max-w-[150px] truncate">{healthMsg}</span>
                 {serverHealth === 'offline' && (
-                    <button onClick={checkServer} className="ml-1 hover:text-white" title="Retry Connection">↻</button>
+                    <button onClick={checkServer} className="ml-1 hover:text-white" title="Retry">↻</button>
                 )}
             </div>
         </div>
 
         <div className="space-y-6">
-          {/* Stats Section */}
           <div className="bg-[#222] p-4 rounded border border-gray-700">
             <h3 className="text-gray-400 text-xs font-bold uppercase mb-4 tracking-wider">Library Stats</h3>
             <div className="grid grid-cols-2 gap-4">
@@ -139,17 +146,9 @@ const SettingsMenu: React.FC<SettingsMenuProps> = ({
             </div>
           </div>
 
-          {/* Actions Section */}
           <div className="space-y-3 pt-2">
-             <input 
-               type="file" 
-               accept=".json" 
-               ref={fileInputRef}
-               onChange={handleFileChange}
-               className="hidden"
-             />
+             <input type="file" accept=".json" ref={fileInputRef} onChange={handleFileChange} className="hidden" />
 
-             {/* SERVER SYNC BUTTON */}
              <div className="w-full">
                 <button 
                     onClick={onSync}
@@ -170,18 +169,14 @@ const SettingsMenu: React.FC<SettingsMenuProps> = ({
                     {isSyncing ? "Uploading..." : "Upload to Server"}
                 </button>
                 
-                {serverHealth === 'offline' && (
+                {serverHealth !== 'online' && !isSyncing && (
                     <p className="text-[10px] text-red-400 text-center mt-1">
-                        Cannot connect. Check if server is running on port 1402.
-                    </p>
-                )}
-                {serverHealth === 'readonly' && (
-                    <p className="text-[10px] text-yellow-500 text-center mt-1">
-                        Server connected but 'data' folder is not writable.
+                        {healthMsg === 'API Route Missing' 
+                           ? "Error: /api request returned HTML. Check Nginx proxy settings." 
+                           : "Connection failed. Check Docker logs."}
                     </p>
                 )}
 
-                {/* PROGRESS BAR */}
                 {isSyncing && (
                     <div className="w-full bg-gray-700 rounded-full h-2.5 mt-2">
                         <div className="bg-red-600 h-2.5 rounded-full transition-all duration-300" style={{ width: `${uploadProgress}%` }}></div>
@@ -189,36 +184,16 @@ const SettingsMenu: React.FC<SettingsMenuProps> = ({
                 )}
              </div>
 
-             <p className="text-[10px] text-gray-500 text-center -mt-1 mb-2">
-                 Syncs your library to this server ({window.location.host}) so other devices can see it.
-             </p>
-
              <div className="grid grid-cols-2 gap-2">
-                 <button 
-                    onClick={onExport}
-                    className="bg-gray-700 hover:bg-gray-600 text-white font-medium py-2 rounded flex items-center justify-center gap-2 transition text-xs"
-                 >
-                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-4 h-4">
-                      <path strokeLinecap="round" strokeLinejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5M16.5 12L12 16.5m0 0L7.5 12m4.5 4.5V3" />
-                    </svg>
+                 <button onClick={onExport} className="bg-gray-700 hover:bg-gray-600 text-white font-medium py-2 rounded flex items-center justify-center gap-2 transition text-xs">
                     Save JSON
                  </button>
-
-                 <button 
-                    onClick={() => fileInputRef.current?.click()}
-                    className="bg-gray-700 hover:bg-gray-600 text-white font-medium py-2 rounded flex items-center justify-center gap-2 transition text-xs"
-                 >
-                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-4 h-4">
-                        <path strokeLinecap="round" strokeLinejoin="round" d="M3 16.5v2.25A2.25 2.25 0 0 0 5.25 21h13.5A2.25 2.25 0 0 0 21 18.75V16.5m-13.5-9L12 3m0 0 4.5 4.5M12 3v13.5" />
-                    </svg>
-                    Load Local JSON
+                 <button onClick={() => fileInputRef.current?.click()} className="bg-gray-700 hover:bg-gray-600 text-white font-medium py-2 rounded flex items-center justify-center gap-2 transition text-xs">
+                    Load JSON
                  </button>
              </div>
 
-             <button 
-                onClick={onLogout}
-                className="w-full bg-transparent border border-gray-600 text-gray-300 hover:border-red-600 hover:text-red-500 font-medium py-3 rounded transition text-sm mt-2"
-             >
+             <button onClick={onLogout} className="w-full bg-transparent border border-gray-600 text-gray-300 hover:border-red-600 hover:text-red-500 font-medium py-3 rounded transition text-sm mt-2">
                 {isAutoConfig ? "Reload Server Content" : "Logout & Clear Data"}
              </button>
           </div>
