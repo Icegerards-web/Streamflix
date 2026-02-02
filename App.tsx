@@ -4,6 +4,7 @@ import Hero from './components/Hero';
 import ContentRow from './components/ContentRow';
 import VideoPlayer from './components/VideoPlayer';
 import PlaylistSetup from './components/PlaylistSetup';
+import SettingsMenu from './components/SettingsMenu';
 import { parseM3U, fetchXtreamPlaylist, fetchUrlContent, categorizeChannels } from './utils/parser';
 import { saveToDB, loadFromDB, clearDB } from './utils/db';
 import { Channel, Category } from './types';
@@ -20,6 +21,10 @@ const App: React.FC = () => {
   const [currentView, setCurrentView] = useState<'home' | 'live' | 'movies' | 'series'>('home');
   const [currentLanguage, setCurrentLanguage] = useState<string>('All');
   const [autoConfigured, setAutoConfigured] = useState(false);
+  
+  // New State for Settings & Search
+  const [showSettings, setShowSettings] = useState(false);
+  const [searchQuery, setSearchQuery] = useState('');
 
   // --- PERSISTENCE & AUTO-CONFIG ---
   useEffect(() => {
@@ -46,8 +51,6 @@ const App: React.FC = () => {
               }
 
               // 2. Try Server-Hosted JSON (Static File)
-              // This is efficient: You host 'playlist.json' on your server.
-              // The app downloads this single file instead of hitting the IPTV API.
               try {
                   const staticResponse = await fetch('playlist.json');
                   if (staticResponse.ok) {
@@ -93,16 +96,11 @@ const App: React.FC = () => {
 
   // Called when M3U is loaded OR Static JSON is loaded
   const processPlaylistData = async (channels: Channel[]) => {
-    // Re-categorize raw channels on the client. 
-    // This allows you to update the app logic (sorting/grouping) without changing the data file.
     const { categories: cats } = categorizeChannels(channels);
-    
     setCategories(cats);
     setAllChannels(channels);
     pickFeatured(channels);
     setIsSetupComplete(true);
-    
-    // Save to DB for next time (Local Cache)
     await saveToDB(cats, channels);
   };
 
@@ -111,7 +109,6 @@ const App: React.FC = () => {
       setAllChannels(prev => {
           const updated = [...prev, ...newChannels];
           const { categories: newCats } = categorizeChannels(updated);
-          
           setCategories(newCats);
           
           if (updated.length > 0 && !featured) {
@@ -120,7 +117,6 @@ const App: React.FC = () => {
                else setFeatured(updated[Math.floor(Math.random() * updated.length)]);
           }
 
-          // Debounce save or save occasionally
           if (updated.length % 500 === 0 || newChannels.length > 100) {
               saveToDB(newCats, updated); 
           }
@@ -176,7 +172,6 @@ const App: React.FC = () => {
   const handleXtreamImport = async (url: string, user: string, pass: string) => {
       setLoading(true);
       setLoadingStatus('Connecting to server...');
-      
       setAllChannels([]);
       setCategories([]);
       await clearDB(); 
@@ -206,13 +201,9 @@ const App: React.FC = () => {
           alert("No data to export.");
           return;
       }
-      
-      // We only export the raw channel list. 
-      // Categories are re-calculated on load to allow for app updates.
       const jsonString = JSON.stringify(allChannels);
       const blob = new Blob([jsonString], { type: "application/json" });
       const url = URL.createObjectURL(blob);
-      
       const link = document.createElement('a');
       link.href = url;
       link.download = "playlist.json";
@@ -222,20 +213,45 @@ const App: React.FC = () => {
       URL.revokeObjectURL(url);
   };
 
-  const handleReset = async () => {
+  const handleImportData = (file: File) => {
+      const reader = new FileReader();
+      reader.onload = async (e) => {
+          try {
+              const text = e.target?.result as string;
+              const data = JSON.parse(text);
+              if (Array.isArray(data) && data.length > 0) {
+                  setLoading(true);
+                  setLoadingStatus('Restoring backup...');
+                  await processPlaylistData(data);
+                  setLoading(false);
+                  setLoadingStatus('');
+                  setShowSettings(false);
+                  alert("Backup restored successfully!");
+              } else {
+                  alert("Invalid backup file. Expected a list of channels.");
+              }
+          } catch (err) {
+              console.error(err);
+              alert("Failed to parse backup file.");
+          }
+      };
+      reader.readAsText(file);
+  };
+
+  const handleLogout = async () => {
     const msg = autoConfigured 
         ? "Reload content from server?" 
         : "Are you sure you want to log out and clear all cached data?";
         
     if(window.confirm(msg)) {
         setLoading(true);
+        setShowSettings(false);
         await clearDB();
         setIsSetupComplete(false);
         setCategories([]);
         setFeatured(null);
         setAllChannels([]);
         
-        // If we have a playlist.json or server config, reloading refreshes from that source
         if (autoConfigured) {
              window.location.reload();
         } else {
@@ -244,24 +260,46 @@ const App: React.FC = () => {
     }
   };
 
+  // Calculate Stats for Settings Menu
+  const libraryStats = useMemo(() => {
+      return {
+          live: allChannels.filter(c => c.contentType === 'live').length,
+          movies: allChannels.filter(c => c.contentType === 'movie').length,
+          series: allChannels.filter(c => c.contentType === 'series').length,
+          total: allChannels.length
+      };
+  }, [allChannels]);
+
+  // Filter Logic with Search
   const filteredCategories = useMemo(() => {
     const targetType = currentView === 'live' ? 'live' : (currentView === 'series' ? 'series' : 'movie');
     const result: Category[] = [];
+    const query = searchQuery.toLowerCase().trim();
     
+    // Helper to check if string matches query
+    const matches = (str: string) => str.toLowerCase().includes(query);
+
     for (const cat of categories) {
         // 1. View Filter
-        const channelsInCat = cat.channels.filter(c => c.contentType === targetType);
+        let channelsInCat = cat.channels.filter(c => c.contentType === targetType);
+        
+        // 2. Search Filter
+        if (query) {
+             channelsInCat = channelsInCat.filter(c => matches(c.name) || matches(c.group || ''));
+        }
         
         if (channelsInCat.length > 0) {
-            // 2. Language Filter
-            if (currentLanguage === 'All' || cat.language === currentLanguage) {
+            // 3. Language Filter (Keep active unless searching specific things, usually better to ignore lang if searching)
+            // If searching, we relax the language filter to find content in other langs
+            if (query || currentLanguage === 'All' || cat.language === currentLanguage) {
                 result.push({ ...cat, channels: channelsInCat });
             }
         }
     }
     return result;
-  }, [categories, currentView, currentLanguage]);
+  }, [categories, currentView, currentLanguage, searchQuery]);
 
+  // Pagination for infinite scroll effect (simple slice for now)
   const visibleCategories = filteredCategories.slice(0, 50);
 
   if (!isSetupComplete && !loading) {
@@ -296,18 +334,30 @@ const App: React.FC = () => {
   return (
     <div className="min-h-screen bg-[#141414] overflow-x-hidden font-sans">
       <Navbar 
-        onOpenSettings={handleReset} 
-        onExportData={handleExportData}
+        onOpenSettings={() => setShowSettings(true)} 
         currentView={currentView}
         onChangeView={setCurrentView}
         currentLanguage={currentLanguage}
         onLanguageChange={setCurrentLanguage}
+        searchQuery={searchQuery}
+        onSearchChange={setSearchQuery}
+      />
+      
+      {/* Settings Modal */}
+      <SettingsMenu 
+        isOpen={showSettings}
+        onClose={() => setShowSettings(false)}
+        stats={libraryStats}
+        onExport={handleExportData}
+        onImport={handleImportData}
+        onLogout={handleLogout}
         isAutoConfig={autoConfigured}
       />
       
-      {currentView === 'home' && featured && <Hero channel={featured} onPlay={setCurrentChannel} />}
+      {/* Hero only on Home and when not searching */}
+      {currentView === 'home' && featured && !searchQuery && <Hero channel={featured} onPlay={setCurrentChannel} />}
       
-      <div className={`${currentView === 'home' ? '-mt-16' : 'mt-24'} relative z-10 pb-20`}>
+      <div className={`${currentView === 'home' && !searchQuery ? '-mt-16' : 'mt-24'} relative z-10 pb-20`}>
           
           {loadingStatus && (
               <div className="fixed bottom-4 right-4 bg-blue-900/80 text-white px-4 py-2 rounded-full text-xs font-bold animate-pulse z-50 backdrop-blur shadow-lg border border-blue-500">
@@ -321,7 +371,9 @@ const App: React.FC = () => {
           {visibleCategories.length === 0 ? (
               <div className="text-center py-20 text-gray-400">
                   <p className="text-xl">
-                      {loadingStatus ? 'Loading content...' : `No content found for ${currentView} in ${currentLanguage}.`}
+                      {loadingStatus ? 'Loading content...' : (
+                          searchQuery ? `No results found for "${searchQuery}"` : `No content found for ${currentView} in ${currentLanguage}.`
+                      )}
                   </p>
               </div>
           ) : (
