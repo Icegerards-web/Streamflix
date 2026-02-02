@@ -66,11 +66,16 @@ const SettingsMenu: React.FC<SettingsMenuProps> = ({
       } catch (e: any) {
           console.error("Connection Check Failed:", e);
           setServerHealth('offline');
-          // Shorten common error messages for the UI badge
-          let msg = e.message;
+          
+          // Map technical errors to user-friendly messages
+          let msg = e.message || 'Unknown Error';
+          
           if (msg.includes('Failed to fetch')) msg = 'Network Error';
-          if (msg.includes('AbortError')) msg = 'Timeout';
+          if (msg.includes('AbortError') || msg.includes('aborted')) msg = 'Timeout';
           if (msg.includes('HTML')) msg = 'API Route Missing';
+          if (msg.includes('500')) msg = 'Server Error (500)';
+          if (msg.includes('502')) msg = 'Bad Gateway (502)';
+          if (msg.includes('404')) msg = 'API Not Found (404)';
           
           setHealthMsg(msg);
       }
@@ -116,7 +121,7 @@ const SettingsMenu: React.FC<SettingsMenuProps> = ({
                     serverHealth === 'readonly' ? 'bg-yellow-500' :
                     'bg-red-500'
                 }`}></div>
-                <span className="max-w-[150px] truncate">{healthMsg}</span>
+                <span className="max-w-[180px] truncate">{healthMsg}</span>
                 {serverHealth === 'offline' && (
                     <button onClick={checkServer} className="ml-1 hover:text-white" title="Retry">↻</button>
                 )}
@@ -172,8 +177,8 @@ const SettingsMenu: React.FC<SettingsMenuProps> = ({
                 {serverHealth !== 'online' && !isSyncing && (
                     <p className="text-[10px] text-red-400 text-center mt-1">
                         {healthMsg === 'API Route Missing' 
-                           ? "Error: /api request returned HTML. Check Nginx proxy settings." 
-                           : "Connection failed. Check Docker logs."}
+                           ? "Error: Frontend running without Backend. Check Docker command." 
+                           : "Connection failed. Check server logs."}
                     </p>
                 )}
 

@@ -14,3 +14,6 @@ services:
     environment:
       - NODE_ENV=production
       - PORT=1402
+    # CRITICAL FIX: Run the Express backend (server.js) instead of 'vite preview'.
+    # This serves the React app AND handles the API endpoints.
+    command: sh -c "npm run build && npm start"
