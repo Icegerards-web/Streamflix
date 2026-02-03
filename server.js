@@ -178,13 +178,13 @@ app.get('/api/proxy', async (req, res) => {
         // --- BINARY STREAM (TS, MP4, MKV) ---
         if (!response.body) return res.end();
         
-        // CRITICAL PERFORMANCE: 
-        // Use a huge High Water Mark (10MB) to pull data from upstream aggressively.
-        // This effectively moves buffering from the client's browser to the server's RAM,
-        // preventing stuttering if the provider is slightly unstable.
-        const stream = Readable.fromWeb(response.body, { highWaterMark: 10 * 1024 * 1024 }); 
+        // CRITICAL PERFORMANCE FIX:
+        // Removed the massive 10MB highWaterMark. Using default/smaller buffer ensures
+        // the server sends the first byte to the client IMMEDIATELY.
+        // This fixes the "ages to load" issue.
+        const stream = Readable.fromWeb(response.body); 
         
-        // Cleanup: If client disconnects, we abort upstream.
+        // CLEANUP: If browser disconnects (e.g., closing video player), destroy upstream immediately.
         req.on('close', () => {
              controller.abort();
              if (!stream.destroyed) {
@@ -192,17 +192,23 @@ app.get('/api/proxy', async (req, res) => {
              }
         });
 
-        // Suppress errors during piping (e.g., client disconnects early)
-        stream.on('error', (err) => {
-            if (err.name !== 'AbortError') {
-               // Silent fail on stream errors is preferred for proxy media to avoid crashing server
-            }
+        res.on('close', () => {
+             controller.abort();
+             if (!stream.destroyed) try { stream.destroy(); } catch (e) {}
         });
 
-        res.on('error', (err) => {
-            controller.abort();
-            stream.destroy();
-        });
+        // Suppress errors during piping (e.g., client disconnects early = EPIPE/ECONNRESET)
+        const handleError = (err) => {
+            if (err.code === 'ECONNRESET' || err.code === 'EPIPE' || err.name === 'AbortError') {
+                // Expected when user stops playing
+                controller.abort();
+            } else {
+                // console.error(`[Proxy Stream Error]`, err.message);
+            }
+        };
+
+        stream.on('error', handleError);
+        res.on('error', handleError);
 
         stream.pipe(res);
 

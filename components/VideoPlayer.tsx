@@ -93,13 +93,13 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({ channel, onClose }) => {
             enableWorker: true,
             manifestLoadingTimeOut: 15000, 
             manifestLoadingMaxRetry: 2,
-            startLevel: -1,
+            // Low Latency / Fast Start
+            startLevel: 0, // Start with lowest quality for instant playback, then switch up
+            startFragPrefetch: true,
             // Optimized Buffering
             maxBufferLength: 60, 
             maxMaxBufferLength: 120,
-            backBufferLength: 30,
-            // Low Latency / Fast Start
-            startFragPrefetch: true
+            backBufferLength: 30
         };
 
         const hls = new window.Hls(hlsConfig);
@@ -239,6 +239,7 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({ channel, onClose }) => {
             className="w-full h-full object-contain"
             controls
             autoPlay
+            preload="auto"
             playsInline
             crossOrigin="anonymous"
         />

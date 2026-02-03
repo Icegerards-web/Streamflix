@@ -151,11 +151,16 @@ export const fetchXtreamSeriesDetails = async (
         if (data.episodes) {
             if (Array.isArray(data.episodes)) {
                 // Case: Provider returns flat array or array of arrays
-                // We must group them by season ourselves
                 const flatList = data.episodes.flat();
                 flatList.forEach((ep: any) => {
-                    // Safe parsing of season number, default to 1 if missing
-                    const sNum = ep.season ? String(ep.season) : '1';
+                    // ROBUST PARSING: Extract only numbers from season field. 
+                    // "Season 1" -> "1", "S02" -> "02"
+                    let sNum = ep.season ? String(ep.season).replace(/\D/g, '') : '1';
+                    // If empty after strip (e.g. "Special"), default to '0'
+                    if (!sNum) sNum = '0';
+                    // Remove leading zeros for consistency ("01" -> "1")
+                    sNum = String(parseInt(sNum));
+
                     if (!episodes[sNum]) episodes[sNum] = [];
                     
                     episodes[sNum].push({
@@ -169,7 +174,25 @@ export const fetchXtreamSeriesDetails = async (
                 });
             } else {
                 // Case: Provider returns Object { "1": [...], "2": [...] }
-                episodes = data.episodes;
+                // We still want to normalize keys to ensure they are clean numbers
+                Object.keys(data.episodes).forEach(key => {
+                    let cleanKey = key.replace(/\D/g, '') || '0';
+                    cleanKey = String(parseInt(cleanKey));
+                    
+                    if (!episodes[cleanKey]) episodes[cleanKey] = [];
+                    
+                    const eps = data.episodes[key];
+                    eps.forEach((ep: any) => {
+                        episodes[cleanKey].push({
+                            id: String(ep.id),
+                            episode_num: String(ep.episode_num),
+                            title: ep.title,
+                            container_extension: ep.container_extension,
+                            info: { duration: ep.info?.duration || '' },
+                            season: parseInt(cleanKey)
+                        });
+                    });
+                });
             }
         }
 
