@@ -24,6 +24,23 @@ export const detectLanguage = (text: string): string => {
    return 'Other';
 };
 
+// Helper to convert MKV/AVI/MP4 Xtream URLs to HLS (m3u8)
+const normalizeXtreamUrl = (url: string): string => {
+    // Regex for standard Xtream Codes VOD structure: /movie/user/pass/id.ext
+    const xcRegex = /^(https?:\/\/[^/]+)\/(movie|series)\/([^/]+)\/([^/]+)\/(\d+)\.(.+)$/i;
+    const match = url.match(xcRegex);
+    
+    if (match) {
+        const ext = match[6].toLowerCase();
+        // If it's not m3u8, force it. Browsers can't play MKV/AVI natively.
+        // Xtream servers generally support on-the-fly transcoding/remuxing to HLS.
+        if (ext !== 'm3u8') {
+             return `${match[1]}/${match[2]}/${match[3]}/${match[4]}/${match[5]}.m3u8`;
+        }
+    }
+    return url;
+};
+
 export const parseM3U = (content: string): { categories: Category[], allChannels: Channel[] } => {
   const channels: Channel[] = [];
   let currentChannel: Partial<Channel> = {};
@@ -50,14 +67,18 @@ export const parseM3U = (content: string): { categories: Category[], allChannels
       };
     } else if (line && !line.startsWith('#')) {
        if (currentChannel.name) {
-         currentChannel.url = line;
-         
-         const isVod = line.match(/\.(mp4|mkv|avi|mov|wmv|flv)$/i);
+         let url = line;
+         // Normalize URL for browser compatibility
+         url = normalizeXtreamUrl(url);
+
+         // Determine content type (simple heuristic)
+         // If we converted to m3u8 from a movie path, it's a movie.
+         const isVod = url.includes('/movie/') || url.includes('/series/') || line.match(/\.(mp4|mkv|avi|mov|wmv|flv)$/i);
          
          channels.push({
              ...currentChannel,
-             contentType: isVod ? 'movie' : 'live',
-             url: line,
+             contentType: url.includes('/series/') ? 'series' : (isVod ? 'movie' : 'live'),
+             url: url,
              language: detectLanguage(currentChannel.group || '')
          } as Channel);
          
@@ -73,11 +94,14 @@ export const parseM3U = (content: string): { categories: Category[], allChannels
   if (start < content.length) {
       const line = content.substring(start).trim();
       if (line && !line.startsWith('#') && currentChannel.name) {
-          const isVod = line.match(/\.(mp4|mkv|avi|mov|wmv|flv)$/i);
+          let url = line;
+          url = normalizeXtreamUrl(url);
+          const isVod = url.includes('/movie/') || url.includes('/series/') || line.match(/\.(mp4|mkv|avi|mov|wmv|flv)$/i);
+
           channels.push({
               ...currentChannel,
-              contentType: isVod ? 'movie' : 'live',
-              url: line,
+              contentType: url.includes('/series/') ? 'series' : (isVod ? 'movie' : 'live'),
+              url: url,
               language: detectLanguage(currentChannel.group || '')
           } as Channel);
       }
@@ -184,10 +208,8 @@ export const fetchXtreamPlaylist = async (
           const name = item.name || item.stream_display_name || item.title || 'Unknown';
           
           const streamId = item.stream_id || item.series_id;
-          // const ext = item.container_extension || 'mp4';
           
           // FORCE .m3u8 for better web compatibility (HLS)
-          // Web browsers cannot play .mkv or .avi natively. Xtream servers usually handle transcoding/remuxing if .m3u8 is requested.
           const ext = 'm3u8'; 
           
           let finalUrl = '';
@@ -220,7 +242,6 @@ export const fetchXtreamPlaylist = async (
           for (const item of items) {
               const cid = String(item.category_id);
               const cname = item.category_name;
-              // LOAD ALL - NO FILTERING
               catMap.set(cid, cname);
               targetArray.push(cid);
           }
