@@ -10,18 +10,24 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({ channel, onClose }) => {
   const videoRef = useRef<HTMLVideoElement>(null);
   const hlsRef = useRef<any>(null); // Store HLS instance
   
-  // Mixed Content Detection: If we are on HTTPS and the stream is HTTP, we MUST use proxy immediately.
-  const isMixedContent = typeof window !== 'undefined' && 
-                         window.location.protocol === 'https:' && 
-                         channel.url.startsWith('http:');
-
-  const [useProxy, setUseProxy] = useState(isMixedContent);
+  // LOGIC: If we are on HTTPS and the stream is HTTP, OR if it's a Live stream (m3u8), 
+  // we default to proxy. Proxy is much safer for Live TV because of CORS and Mixed Content.
+  const isHttps = typeof window !== 'undefined' && window.location.protocol === 'https:';
+  const isHttpStream = channel.url.startsWith('http:');
+  const isLive = channel.contentType === 'live' || channel.url.includes('.m3u8');
+  
+  // Default to proxy if Mixed Content OR Live Stream (for stability)
+  const [useProxy, setUseProxy] = useState(isHttps && isHttpStream || isLive);
   const [error, setError] = useState<string | null>(null);
   const [status, setStatus] = useState<'initializing' | 'playing' | 'buffering' | 'error'>('initializing');
   const [debugMsg, setDebugMsg] = useState('Initializing...');
 
   useEffect(() => {
-    setUseProxy(isMixedContent);
+    // Reset state on channel change
+    // Always prefer proxy for live streams to ensure headers are sanitized (VLC Agent)
+    const shouldProxy = (isHttps && isHttpStream) || isLive;
+    setUseProxy(shouldProxy);
+    
     setError(null);
     setStatus('initializing');
     setDebugMsg('Loading stream...');
@@ -41,12 +47,11 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({ channel, onClose }) => {
         ? `/api/proxy?url=${encodeURIComponent(channel.url)}` 
         : channel.url;
     
-    console.log(`[Player] Loading: ${streamUrl} (Proxy: ${useProxy}, MixedContent: ${isMixedContent})`);
+    console.log(`[Player] Loading: ${streamUrl}`);
     
-    if (useProxy) {
-        setDebugMsg('Securing stream...');
-    }
+    if (useProxy) setDebugMsg('Connecting via Secure Relay...');
 
+    // Detect if HLS
     const isM3U8 = streamUrl.toLowerCase().includes('.m3u8') || 
                    (channel.contentType === 'live' && !streamUrl.toLowerCase().match(/\.(mp4|mkv|avi|mov)$/));
 
@@ -55,7 +60,7 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({ channel, onClose }) => {
         setDebugMsg('');
     };
 
-    const handleFailure = (msg: string, fatal: boolean = false) => {
+    const handleFailure = (msg: string) => {
         console.warn(`[Player Error] ${msg}`);
         
         // If we failed and haven't tried proxy yet, try it.
@@ -65,7 +70,6 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({ channel, onClose }) => {
             return;
         }
 
-        // If we are already using proxy, then it's a real dead end.
         setStatus('error');
         setError(msg);
     };
@@ -74,9 +78,13 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({ channel, onClose }) => {
         const hls = new window.Hls({
             enableWorker: true,
             lowLatencyMode: true,
+            // Tuning for Speed & Stability
             manifestLoadingTimeOut: 20000,
             levelLoadingTimeOut: 20000,
             fragLoadingTimeOut: 20000,
+            startFragPrefetch: true, // Fetch first segment immediately
+            liveSyncDurationCount: 3, // Lower latency for live
+            maxBufferLength: 30, // Keep buffer small for live stability
         });
         hlsRef.current = hls;
 
@@ -92,13 +100,8 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({ channel, onClose }) => {
             if (data.fatal) {
                 switch (data.type) {
                     case window.Hls.ErrorTypes.NETWORK_ERROR:
-                        console.warn("HLS Network Error");
-                        if (data.response?.code === 403 || data.response?.code === 0) {
-                             hls.destroy();
-                             handleFailure("Network blocked. Retrying secure connection...");
-                        } else {
-                             hls.startLoad();
-                        }
+                        console.warn("HLS Network Error", data);
+                        hls.startLoad(); // Aggressively try to recover network errors
                         break;
                     case window.Hls.ErrorTypes.MEDIA_ERROR:
                         console.warn("HLS Media Error - recovering...");
@@ -158,7 +161,7 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({ channel, onClose }) => {
             <h2 className="text-xl font-bold text-white truncate drop-shadow-md">{channel.name}</h2>
             <div className="flex items-center gap-2 mt-1">
                 <span className="text-gray-300 text-xs px-2 py-1 bg-white/10 rounded">{channel.group}</span>
-                {useProxy && <span className="text-blue-300 text-xs px-2 py-1 bg-blue-900/50 rounded border border-blue-800">SECURE RELAY</span>}
+                {useProxy && <span className="text-blue-300 text-xs px-2 py-1 bg-blue-900/50 rounded border border-blue-800">ENCRYPTED</span>}
             </div>
         </div>
         
@@ -187,17 +190,17 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({ channel, onClose }) => {
                 <div className="bg-[#181818] p-8 rounded-xl border border-gray-700 max-w-lg w-full text-center shadow-2xl">
                     <h3 className="text-2xl font-bold text-red-500 mb-2">Stream Offline</h3>
                     <p className="text-gray-300 mb-6">
-                        {error}
+                        The connection to the source server failed.
                         <br/>
                         <span className="text-sm text-gray-500 mt-2 block">
-                            We tried to connect via a secure relay but the source server is not responding.
+                           We tried to use our secure relay (User-Agent: VLC), but the upstream server is not responding. 
                         </span>
                     </p>
                     <button 
                         onClick={() => { setStatus('initializing'); setUseProxy(true); }}
                         className="bg-white text-black font-bold py-2 px-6 rounded hover:bg-gray-200 transition"
                     >
-                        Retry Connection
+                        Retry
                     </button>
                 </div>
             </div>

@@ -18,25 +18,12 @@ const ensureDataDir = () => {
     try {
         if (!fs.existsSync(DATA_DIR)) {
             fs.mkdirSync(DATA_DIR, { recursive: true });
-            console.log(`[Server] Created data directory: ${DATA_DIR}`);
-        }
-        try {
-            fs.chmodSync(DATA_DIR, 0o777);
-        } catch (e) {
-            console.warn(`[Server] Note: Could not chmod data directory: ${e.message}`);
         }
     } catch (err) {
         console.error(`[Server] ERROR: Could not access data directory.`, err);
     }
 };
 ensureDataDir();
-
-app.use((req, res, next) => {
-    if (req.url.startsWith('/api') && !req.url.startsWith('/api/proxy')) {
-        console.log(`[API Request] ${req.method} ${req.url}`);
-    }
-    next();
-});
 
 // Gzip responses
 app.use(compression());
@@ -67,87 +54,121 @@ app.get('/api/health', (req, res) => {
         fs.unlinkSync(testFile);
         res.json({ status: 'ok', writable: true });
     } catch (e) {
-        console.error("Health Check Failed:", e);
         res.json({ status: 'error', writable: false, error: e.message });
     }
 });
 
-// API: Smart Stream Proxy (Bypasses CORS/Mixed Content & Rewrites HLS)
+// --- ADVANCED PROXY ---
+// Fixes Mixed Content, Masquerades as VLC, and Handles HLS Rewriting
 app.get('/api/proxy', async (req, res) => {
     const { url } = req.query;
     if (!url || typeof url !== 'string') return res.status(400).send('Url required');
 
     try {
-        // Forward Range header for video seeking
+        // 1. Masquerade as VLC to prevent blocking/throttling by IPTV providers
         const headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+            'User-Agent': 'VLC/3.0.18 LibVLC/3.0.18',
+            'Accept': '*/*',
+            'Connection': 'keep-alive'
         };
+        
+        // Forward Range header for seeking
         if (req.headers.range) {
             headers['Range'] = req.headers.range;
         }
 
-        const response = await fetch(url, { headers });
+        const controller = new AbortController();
+        // 30s timeout for initial connection
+        const timeout = setTimeout(() => controller.abort(), 30000);
+
+        const response = await fetch(url, { 
+            headers, 
+            signal: controller.signal,
+            redirect: 'follow' // Follow redirects to get the final URL for relative path resolution
+        });
+        
+        clearTimeout(timeout);
 
         if (!response.ok) {
             return res.status(response.status).send(`Upstream Error: ${response.statusText}`);
         }
 
-        // Forward important headers
-        const forwardHeaders = ['content-type', 'content-length', 'accept-ranges', 'content-range', 'access-control-allow-origin'];
-        forwardHeaders.forEach(h => {
+        // 2. Header Sanitization
+        // We do NOT forward Content-Encoding or Content-Length blindly. 
+        // Node's pipe handles chunked encoding automatically. 
+        // Forwarding them often causes ERR_HTTP2_PROTOCOL_ERROR or broken downloads.
+        const safeHeaders = ['content-type', 'accept-ranges', 'last-modified', 'etag'];
+        safeHeaders.forEach(h => {
             const val = response.headers.get(h);
             if (val) res.setHeader(h, val);
         });
 
+        // 3. Content Sniffing & HLS Rewrite
         const contentType = response.headers.get('content-type') || '';
-        
-        // --- SMART HLS REWRITE ---
-        // If it's an M3U8 playlist, we must rewrite internal URLs to use the proxy
-        // otherwise the browser will try to fetch http:// segments directly and fail (Mixed Content).
-        if (contentType.includes('mpegurl') || contentType.includes('m3u8') || url.endsWith('.m3u8')) {
-            let text = await response.text();
-            
-            // Determine base URL for resolving relative paths
-            // If url is http://site.com/folder/list.m3u8, base is http://site.com/folder/
-            const baseUrl = url.substring(0, url.lastIndexOf('/') + 1);
-            const myHost = req.get('host');
-            const protocol = req.protocol;
+        const isM3U8 = contentType.includes('mpegurl') || 
+                       contentType.includes('m3u8') || 
+                       url.endsWith('.m3u8');
 
-            // Rewrite every line that is a URL (does not start with #)
-            text = text.replace(/^(?!#)(?!\s)(.+)$/gm, (match) => {
-                let target = match.trim();
-                
-                // Resolve relative URLs to absolute
-                try {
-                    if (!target.startsWith('http')) {
-                        target = new URL(target, baseUrl).toString();
+        // Check buffer for #EXTM3U to be sure it's a playlist, not a TS stream labeled incorrectly
+        if (isM3U8) {
+            const buffer = await response.arrayBuffer();
+            const text = new TextDecoder().decode(buffer);
+
+            // Double check: Does it look like a playlist?
+            if (text.trim().startsWith('#EXTM3U')) {
+                // Resolution Base: Use response.url (final URL after redirects)
+                const baseUrl = response.url.substring(0, response.url.lastIndexOf('/') + 1);
+                const myHost = req.get('host');
+                const protocol = req.protocol;
+
+                // Rewrite Logic:
+                // Find lines that are NOT comments (#) and are NOT empty.
+                const rewritten = text.replace(/^(?!#)(?!\s)(.+)$/gm, (match) => {
+                    let target = match.trim();
+                    
+                    // Resolve relative URLs
+                    try {
+                        if (!target.startsWith('http')) {
+                            target = new URL(target, baseUrl).toString();
+                        }
+                    } catch (e) { /* keep original on error */ }
+
+                    // Recursive Proxy: Point back to this proxy
+                    return `${protocol}://${myHost}/api/proxy?url=${encodeURIComponent(target)}`;
+                });
+
+                res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
+                res.send(rewritten);
+                return;
+            } else {
+                // It was labeled m3u8 but isn't text? Send as binary.
+                res.setHeader('Content-Type', 'video/mp2t'); // Force TS content type
+                // @ts-ignore
+                Readable.fromWeb(new ReadableStream({
+                    start(controller) {
+                        controller.enqueue(new Uint8Array(buffer));
+                        controller.close();
                     }
-                } catch (e) {
-                    // Fallback if URL resolution fails, use original logic or keep as is
-                }
-
-                // Wrap in proxy
-                return `${protocol}://${myHost}/api/proxy?url=${encodeURIComponent(target)}`;
-            });
-
-            res.send(text);
-            return;
+                })).pipe(res);
+                return;
+            }
         }
 
-        // --- DIRECT STREAMING ---
-        // For TS chunks, MP4s, etc., just pipe the binary data
+        // 4. Binary Stream (MP4, MKV, TS Chunks)
         if (!response.body) return res.end();
         
         // @ts-ignore
         Readable.fromWeb(response.body).pipe(res);
-        
+
     } catch (e) {
-        console.error(`[Proxy Error] ${url}:`, e.message);
-        if (!res.headersSent) res.status(500).send('Proxy Request Failed');
+        if (e.name !== 'AbortError') {
+             console.error(`[Proxy Error] ${url}:`, e.message);
+        }
+        if (!res.headersSent) res.status(500).send('Stream Unavailable');
     }
 });
 
-// API: Robust Chunked Upload
+// API: Robust Chunked Upload (Keep existing logic)
 app.post('/api/upload-chunk', express.raw({ type: 'application/octet-stream', limit: '50mb' }), async (req, res) => {
     try {
         const { id, index, total } = req.query;
@@ -162,7 +183,6 @@ app.post('/api/upload-chunk', express.raw({ type: 'application/octet-stream', li
         fs.writeFileSync(chunkFilePath, req.body);
         
         if (chunkIndex === totalChunks - 1) {
-            console.log(`[Server] Received final chunk for ${id}. Merging...`);
             
             for (let i = 0; i < totalChunks; i++) {
                 if (!fs.existsSync(path.join(DATA_DIR, `upload_${id}_part_${i}`))) {
