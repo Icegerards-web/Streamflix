@@ -6,7 +6,7 @@ import VideoPlayer from './components/VideoPlayer';
 import PlaylistSetup from './components/PlaylistSetup';
 import SettingsMenu from './components/SettingsMenu';
 import { parseM3U, fetchXtreamPlaylist, fetchUrlContent, categorizeChannels } from './utils/parser';
-import { saveToDB, loadFromDB, clearDB } from './utils/db';
+import { saveToDB, loadFromDB, clearDB, getHistory, addToHistory } from './utils/db';
 import { Channel, Category } from './types';
 import { SERVER_CONFIG } from './constants';
 
@@ -28,8 +28,15 @@ const App: React.FC = () => {
   const [isSyncing, setIsSyncing] = useState(false);
   const [uploadProgress, setUploadProgress] = useState(0);
 
+  // History & Recommendations
+  const [history, setHistory] = useState<Channel[]>([]);
+  const [recommendations, setRecommendations] = useState<Channel[]>([]);
+
   // --- PERSISTENCE & AUTO-CONFIG ---
   useEffect(() => {
+      // Load history on mount
+      setHistory(getHistory());
+
       const initLoad = async () => {
           setLoading(true);
           setLoadingStatus('Checking library...');
@@ -42,6 +49,7 @@ const App: React.FC = () => {
                   setCategories(recategorized);
                   setAllChannels(cached.allChannels);
                   pickFeatured(cached.allChannels);
+                  generateRecommendations(cached.allChannels);
                   setIsSetupComplete(true);
                   
                   checkStaticFileExists().then(exists => {
@@ -111,6 +119,7 @@ const App: React.FC = () => {
     setCategories(cats);
     setAllChannels(channels);
     pickFeatured(channels);
+    generateRecommendations(channels);
     setIsSetupComplete(true);
     await saveToDB(cats, channels);
   };
@@ -127,6 +136,11 @@ const App: React.FC = () => {
                else setFeatured(updated[Math.floor(Math.random() * updated.length)]);
           }
 
+          // Initial recommendations
+          if (recommendations.length === 0 && updated.length > 50) {
+             generateRecommendations(updated);
+          }
+
           if (updated.length % 500 === 0 || newChannels.length > 100) {
               saveToDB(newCats, updated); 
           }
@@ -136,7 +150,7 @@ const App: React.FC = () => {
 
       setIsSetupComplete(true);
       setLoading(false); 
-  }, [featured]);
+  }, [featured, recommendations]);
 
   const pickFeatured = (channels: Channel[]) => {
     const movies = channels.filter(c => c.contentType === 'movie');
@@ -145,6 +159,30 @@ const App: React.FC = () => {
         const random = featuredPool[Math.floor(Math.random() * featuredPool.length)];
         setFeatured(random);
     }
+  };
+
+  const generateRecommendations = (channels: Channel[]) => {
+      if (!channels || channels.length === 0) return;
+      // Simple logic: Pick 15 random items
+      const recs: Channel[] = [];
+      const usedIndices = new Set<number>();
+      const attempts = Math.min(channels.length, 15);
+      
+      while(recs.length < attempts) {
+          const idx = Math.floor(Math.random() * channels.length);
+          if (!usedIndices.has(idx)) {
+              usedIndices.add(idx);
+              recs.push(channels[idx]);
+          }
+      }
+      setRecommendations(recs);
+  };
+
+  const handlePlayChannel = (channel: Channel) => {
+      setCurrentChannel(channel);
+      // Update history immediately
+      const newHistory = addToHistory(channel);
+      setHistory(newHistory);
   };
 
   const handleM3UImport = async (input: string) => {
@@ -184,6 +222,7 @@ const App: React.FC = () => {
       setLoadingStatus('Connecting to server...');
       setAllChannels([]);
       setCategories([]);
+      setRecommendations([]);
       await clearDB(); 
 
       try {
@@ -349,14 +388,34 @@ const App: React.FC = () => {
   }, [allChannels]);
 
   const filteredCategories = useMemo(() => {
+    // Basic Filtering based on View
     const targetType = currentView === 'live' ? 'live' : (currentView === 'series' ? 'series' : 'movie');
     const result: Category[] = [];
     const query = searchQuery.toLowerCase().trim();
     
     const matches = (str: string) => str.toLowerCase().includes(query);
 
+    // If viewing 'home', we show a mix or specific logic
+    if (currentView === 'home' && !searchQuery) {
+        // Add History
+        if (history.length > 0) {
+            result.push({ name: 'Recently Watched', channels: history, language: 'All' });
+        }
+        // Add Recommendations
+        if (recommendations.length > 0) {
+            result.push({ name: 'Recommended for You', channels: recommendations, language: 'All' });
+        }
+    }
+
+    // Filter main categories
     for (const cat of categories) {
-        let channelsInCat = cat.channels.filter(c => c.contentType === targetType);
+        // If View is 'home', we allow all types but prioritize categorization. 
+        // If View is specific, we filter by type.
+        let channelsInCat = cat.channels;
+        
+        if (currentView !== 'home') {
+            channelsInCat = channelsInCat.filter(c => c.contentType === targetType);
+        }
         
         if (query) {
              channelsInCat = channelsInCat.filter(c => matches(c.name) || matches(c.group || ''));
@@ -369,7 +428,7 @@ const App: React.FC = () => {
         }
     }
     return result;
-  }, [categories, currentView, currentLanguage, searchQuery]);
+  }, [categories, currentView, currentLanguage, searchQuery, history, recommendations]);
 
   const visibleCategories = filteredCategories.slice(0, 50);
 
@@ -427,7 +486,7 @@ const App: React.FC = () => {
         uploadProgress={uploadProgress}
       />
       
-      {currentView === 'home' && featured && !searchQuery && <Hero channel={featured} onPlay={setCurrentChannel} />}
+      {currentView === 'home' && featured && !searchQuery && <Hero channel={featured} onPlay={handlePlayChannel} />}
       
       <div className={`${currentView === 'home' && !searchQuery ? '-mt-16' : 'mt-24'} relative z-10 pb-20`}>
           
@@ -450,7 +509,7 @@ const App: React.FC = () => {
               </div>
           ) : (
               visibleCategories.map((cat) => (
-                  <ContentRow key={cat.name} category={cat} onPlay={setCurrentChannel} />
+                  <ContentRow key={`${cat.name}-${currentView}`} category={cat} onPlay={handlePlayChannel} />
               ))
           )}
       </div>

@@ -46,6 +46,7 @@ const Navbar: React.FC<NavbarProps> = ({
             <ul className="hidden md:flex gap-6 text-sm text-gray-200">
                 <li onClick={() => onChangeView('home')} className={getLinkClass('home')}>Home</li>
                 <li onClick={() => onChangeView('live')} className={getLinkClass('live')}>Live TV</li>
+                <li onClick={() => onChangeView('series')} className={getLinkClass('series')}>Series</li>
                 <li onClick={() => onChangeView('movies')} className={getLinkClass('movies')}>Movies</li>
             </ul>
         </div>

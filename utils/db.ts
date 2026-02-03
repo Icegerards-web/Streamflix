@@ -3,6 +3,7 @@ import { Channel, Category } from '../types';
 const DB_NAME = 'StreamFlixDB';
 const DB_VERSION = 1;
 const STORE_NAME = 'playlist';
+const HISTORY_KEY = 'streamflix_history';
 
 interface PlaylistData {
   id: string; // usually 'current'
@@ -81,7 +82,42 @@ export const clearDB = async (): Promise<void> => {
     const tx = db.transaction(STORE_NAME, 'readwrite');
     const store = tx.objectStore(STORE_NAME);
     store.clear();
+    // Also clear history
+    try {
+        localStorage.removeItem(HISTORY_KEY);
+    } catch(e) {}
+    
     return new Promise((resolve) => {
         tx.oncomplete = () => resolve();
     });
+};
+
+// --- HISTORY UTILS ---
+
+export const getHistory = (): Channel[] => {
+    try {
+        const raw = localStorage.getItem(HISTORY_KEY);
+        if (!raw) return [];
+        return JSON.parse(raw);
+    } catch (e) {
+        return [];
+    }
+};
+
+export const addToHistory = (channel: Channel): Channel[] => {
+    try {
+        let history = getHistory();
+        // Remove existing entry of same ID to push to top
+        history = history.filter(h => h.id !== channel.id);
+        // Add to front
+        history.unshift(channel);
+        // Limit to 20 items
+        if (history.length > 20) history = history.slice(0, 20);
+        
+        localStorage.setItem(HISTORY_KEY, JSON.stringify(history));
+        return history;
+    } catch (e) {
+        console.warn("Failed to save history", e);
+        return [];
+    }
 };

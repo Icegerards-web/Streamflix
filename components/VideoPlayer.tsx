@@ -76,22 +76,24 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({ channel, onClose }) => {
 
     if (isM3U8 && window.Hls && window.Hls.isSupported()) {
         
-        // CONFIGURATION: Tuned for Stability (Reverted from aggressive optimization)
+        // CONFIGURATION: Tuned for Low Latency without sacrificing Stability
         const hlsConfig = isLive 
         ? {
             // LIVE SETTINGS
             enableWorker: true,
-            lowLatencyMode: false, // Vital for stability
+            lowLatencyMode: false, // Keep false for maximum compatibility
             
-            // Start fragments further back to avoid hitting the "live edge" (where segments might not exist yet)
-            liveSyncDurationCount: 5, 
-            liveMaxLatencyDurationCount: 10,
+            // Latency Control: 
+            // Reduced from 5 to 3 to start closer to live edge (approx 20s-30s delay instead of 60s)
+            liveSyncDurationCount: 3, 
+            // Cap max latency to prevent drifting too far back
+            liveMaxLatencyDurationCount: 6,
             
-            // Healthy buffers
+            // Buffer Strategy: Reduced for live to prevent lagging behind
             backBufferLength: 30,
-            maxBufferLength: 30, 
+            maxBufferLength: 12, 
             
-            // Generous Timeouts
+            // Generous Timeouts (Keep these for stability)
             manifestLoadingTimeOut: 30000,
             levelLoadingTimeOut: 30000,
             fragLoadingTimeOut: 30000,

@@ -112,6 +112,11 @@ app.get('/api/proxy', async (req, res) => {
             if (val) res.setHeader(h, val);
         });
 
+        // FORCE NO-CACHE: Vital for live streams to prevent old segments from sticking
+        res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+        res.setHeader('Pragma', 'no-cache');
+        res.setHeader('Expires', '0');
+
         // Content Type Detection
         const contentType = response.headers.get('content-type') || '';
         const lowerUrl = url.toLowerCase();
