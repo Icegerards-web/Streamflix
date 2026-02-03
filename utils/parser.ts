@@ -184,7 +184,11 @@ export const fetchXtreamPlaylist = async (
           const name = item.name || item.stream_display_name || item.title || 'Unknown';
           
           const streamId = item.stream_id || item.series_id;
-          const ext = item.container_extension || 'mp4';
+          // const ext = item.container_extension || 'mp4';
+          
+          // FORCE .m3u8 for better web compatibility (HLS)
+          // Web browsers cannot play .mkv or .avi natively. Xtream servers usually handle transcoding/remuxing if .m3u8 is requested.
+          const ext = 'm3u8'; 
           
           let finalUrl = '';
           if (type === 'live') finalUrl = `${host}/live/${username}/${password}/${streamId}.m3u8`;
@@ -234,8 +238,6 @@ export const fetchXtreamPlaylist = async (
   }
 
   // --- SORTING ---
-  // We sort categories so the preferred languages (English/Dutch/German) are fetched FIRST.
-  // This gives the "Speed" effect while still loading everything.
   const sortCategories = (ids: string[]) => {
       return ids.sort((a, b) => {
           const nameA = catMap.get(a) || '';
@@ -254,20 +256,17 @@ export const fetchXtreamPlaylist = async (
   const sortedSeries = sortCategories(seriesCatIds);
 
   // 2. Fetch Live Streams
-  // For Live, we usually fetch all at once (get_live_streams) as it's faster than 100 requests.
   if (sortedLive.length > 0) {
       onProgress("Loading Live TV...");
       try {
           const liveData = await fetchUrlContent(`${apiUrl}&action=get_live_streams`, 'json');
           const liveItems = Array.isArray(liveData) ? liveData : [];
-          // Parse all live items
           const liveChannels = parseXtreamItems(liveItems, 'live');
           if (liveChannels.length > 0) onChunkLoaded(liveChannels);
       } catch (e) { console.warn("Live fetch failed"); }
   }
 
   // 3. OPTIMIZED VOD FETCHING (Batch by Category)
-  // Higher concurrency for faster total load
   const MAX_CONCURRENT = 10;
 
   const fetchBatch = async (ids: string[], type: 'movie' | 'series', action: string) => {

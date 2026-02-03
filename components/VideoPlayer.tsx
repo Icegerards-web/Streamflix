@@ -13,15 +13,23 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({ channel, onClose }) => {
   const [useProxy, setUseProxy] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
   const [retryCount, setRetryCount] = useState(0);
+  
+  // New state to track the active URL being played (to support failover to .m3u8)
+  const [currentUrl, setCurrentUrl] = useState(channel.url);
+  const [isHlsOverride, setIsHlsOverride] = useState(false);
 
   // Reset state on channel change
   useEffect(() => {
     // Auto-detect Mixed Content immediately
     const needsProxy = window.location.protocol === 'https:' && channel.url.startsWith('http:') && !channel.url.includes('corsproxy');
+    
+    // Reset Everything
     setUseProxy(needsProxy);
     setRetryCount(0);
     setError(null);
     setIsLoading(true);
+    setCurrentUrl(channel.url);
+    setIsHlsOverride(false);
   }, [channel]);
 
   useEffect(() => {
@@ -31,17 +39,18 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({ channel, onClose }) => {
     setIsLoading(true);
     setError(null);
 
-    // 1. Determine URL
+    // 1. Determine Final URL (Proxy + Override)
     const finalUrl = useProxy 
-        ? `https://corsproxy.io/?${encodeURIComponent(channel.url)}` 
-        : channel.url;
+        ? `https://corsproxy.io/?${encodeURIComponent(currentUrl)}` 
+        : currentUrl;
 
     // Detect if source is HLS (m3u8)
-    const isM3U8 = /\.m3u8(\?.*)?$/i.test(finalUrl) || (useProxy && channel.url.includes('.m3u8'));
+    // We check the URL extension OR if we forced HLS override
+    const isM3U8 = isHlsOverride || /\.m3u8(\?.*)?$/i.test(finalUrl) || (useProxy && currentUrl.includes('.m3u8'));
 
     console.log(`[Player] Loading: ${channel.name}`);
     console.log(`[Player] Url: ${finalUrl}`);
-    console.log(`[Player] Mode: ${isM3U8 ? 'HLS' : 'Native'} | Proxy: ${useProxy}`);
+    console.log(`[Player] Type: ${isM3U8 ? 'HLS' : 'Native'} | Proxy: ${useProxy}`);
 
     // 2. Cleanup previous HLS
     if (hlsRef.current) {
@@ -80,7 +89,7 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({ channel, onClose }) => {
                         if (!useProxy) {
                             console.log("HLS Network Error -> Switching to Proxy");
                             setUseProxy(true);
-                            return; // Trigger re-render
+                            return; 
                         }
                         hls.startLoad();
                         break;
@@ -114,11 +123,32 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({ channel, onClose }) => {
             console.error("[Native Error]", video.error);
             setIsLoading(false);
             
-            // If error and not proxy, try proxy first
+            // SMART RECOVERY LOGIC
+            
+            // 1. If we haven't tried Proxy yet, try that first.
             if (!useProxy) {
                 console.log("Native Error -> Switching to Proxy");
                 setUseProxy(true);
                 return;
+            }
+
+            // 2. If Proxy didn't work (or was already on), and it's NOT HLS yet,
+            // Check if we can convert a standard VOD URL to HLS (.m3u8).
+            // Many IPTV providers support changing .mkv/.mp4 to .m3u8 to get HLS.
+            if (!isM3U8 && !isHlsOverride) {
+                // Regex matches standard Xtream Codes patterns: /movie/user/pass/id.ext
+                const xcRegex = /^(https?:\/\/[^/]+)\/(movie|series)\/([^/]+)\/([^/]+)\/(\d+)\.(.+)$/i;
+                const match = currentUrl.match(xcRegex);
+                
+                if (match) {
+                    // Reconstruct URL with .m3u8 extension
+                    const newUrl = `${match[1]}/${match[2]}/${match[3]}/${match[4]}/${match[5]}.m3u8`;
+                    console.log(`[Player] Smart Fallback: Converting MKV/MP4 to HLS -> ${newUrl}`);
+                    
+                    setCurrentUrl(newUrl);
+                    setIsHlsOverride(true); // Force HLS mode next render
+                    return;
+                }
             }
 
             const code = video.error.code;
@@ -134,10 +164,7 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({ channel, onClose }) => {
     };
 
     const handleStalled = () => {
-        // If stuck loading for too long
-        if (isLoading) {
-             console.log("Stalled...");
-        }
+        if (isLoading) console.log("Stalled...");
     };
 
     video.addEventListener('error', handleNativeError);
@@ -157,7 +184,7 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({ channel, onClose }) => {
             video.load();
         }
     };
-  }, [channel, useProxy, retryCount]);
+  }, [currentUrl, useProxy, isHlsOverride]);
 
   return (
     <div className="fixed inset-0 z-50 bg-black flex flex-col justify-center items-center">
@@ -166,7 +193,7 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({ channel, onClose }) => {
         <div className="max-w-[60%]">
             <h2 className="text-xl font-bold text-white truncate">{channel.name}</h2>
             <p className="text-gray-300 text-sm truncate">
-                {channel.group}
+                {channel.group} {isHlsOverride && <span className="text-xs text-green-500 ml-2 border border-green-500 px-1 rounded">HLS MODE</span>}
             </p>
         </div>
         
@@ -223,7 +250,7 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({ channel, onClose }) => {
                     </a>
                 </div>
                 <div className="mt-6 text-[10px] text-gray-500 font-mono break-all p-2 bg-black rounded">
-                    Source: {channel.url}
+                    Original Source: {channel.url}
                 </div>
             </div>
         )}
