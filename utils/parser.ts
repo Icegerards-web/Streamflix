@@ -142,7 +142,36 @@ export const fetchXtreamSeriesDetails = async (
         const url = `${host}/player_api.php?username=${username}&password=${password}&action=get_series_info&series_id=${seriesId}`;
         const data = await fetchUrlContent(url, 'json');
         
-        if (!data || !data.episodes) return null;
+        if (!data) return null;
+
+        // --- NORMALIZATION LOGIC ---
+        // Handle episodes. Some providers return an Array, some return an Object keyed by season.
+        let episodes: Record<string, SeriesEpisode[]> = {};
+        
+        if (data.episodes) {
+            if (Array.isArray(data.episodes)) {
+                // Case: Provider returns flat array or array of arrays
+                // We must group them by season ourselves
+                const flatList = data.episodes.flat();
+                flatList.forEach((ep: any) => {
+                    // Safe parsing of season number, default to 1 if missing
+                    const sNum = ep.season ? String(ep.season) : '1';
+                    if (!episodes[sNum]) episodes[sNum] = [];
+                    
+                    episodes[sNum].push({
+                        id: String(ep.id),
+                        episode_num: String(ep.episode_num),
+                        title: ep.title,
+                        container_extension: ep.container_extension,
+                        info: { duration: ep.info?.duration || '' },
+                        season: parseInt(sNum)
+                    });
+                });
+            } else {
+                // Case: Provider returns Object { "1": [...], "2": [...] }
+                episodes = data.episodes;
+            }
+        }
 
         return {
             info: {
@@ -155,7 +184,7 @@ export const fetchXtreamSeriesDetails = async (
                 releaseDate: data.info?.releaseDate || '',
                 rating: data.info?.rating || ''
             },
-            episodes: data.episodes
+            episodes: episodes
         };
     } catch (e) {
         console.error("Failed to fetch series info", e);
