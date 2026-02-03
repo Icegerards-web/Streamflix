@@ -76,39 +76,25 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({ channel, onClose }) => {
 
     if (isM3U8 && window.Hls && window.Hls.isSupported()) {
         
-        // CONFIGURATION: Optimized for Buffering Reduction
+        // CONFIGURATION: Tuned for Stability (Reverted from aggressive optimization)
         const hlsConfig = isLive 
         ? {
             // LIVE SETTINGS
             enableWorker: true,
             lowLatencyMode: false, // Vital for stability
             
-            // Sync & Latency: Stay safely behind live edge (approx 20-30s)
-            liveSyncDurationCount: 4, 
-            liveMaxLatencyDurationCount: 15,
-            liveDurationInfinity: true, // Handle streams with bad duration metadata
-
-            // Buffer Strategy
+            // Start fragments further back to avoid hitting the "live edge" (where segments might not exist yet)
+            liveSyncDurationCount: 5, 
+            liveMaxLatencyDurationCount: 10,
+            
+            // Healthy buffers
             backBufferLength: 30,
-            maxBufferLength: 30, // 30s is standard; too high can cause stalls if server is slow
+            maxBufferLength: 30, 
             
-            // Network Timeouts & Retries (Aggressive retry)
-            manifestLoadingTimeOut: 15000, // Fail faster to retry
-            manifestLoadingMaxRetry: 4,
-            levelLoadingTimeOut: 15000,
-            levelLoadingMaxRetry: 4,
-            fragLoadingTimeOut: 20000,
-            fragLoadingMaxRetry: 6, // Try harder to get segments before giving up
-            
-            // Adaptive Bitrate (ABR) Tuning - THE KEY TO REDUCING BUFFERING
-            startLevel: -1, // Auto-detect
-            abrBandwidthFactor: 0.8, // Conservative: use 80% of est. bandwidth to leave room for jitter
-            abrEwmaFastLive: 5.0, // Slower adaptation to drops
-            abrEwmaSlowLive: 10.0,
-            
-            // Error Recovery (Gap Skipping)
-            nudgeOffset: 0.2, // Skip small gaps
-            nudgeMaxRetry: 5,
+            // Generous Timeouts
+            manifestLoadingTimeOut: 30000,
+            levelLoadingTimeOut: 30000,
+            fragLoadingTimeOut: 30000,
         } 
         : {
             // VOD SETTINGS
@@ -120,7 +106,6 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({ channel, onClose }) => {
             manifestLoadingTimeOut: 30000,
             levelLoadingTimeOut: 30000,
             fragLoadingTimeOut: 30000,
-            abrBandwidthFactor: 0.9, // 90% for VOD
         };
 
         const hls = new window.Hls(hlsConfig);
