@@ -54,6 +54,14 @@ const App: React.FC = () => {
           } catch (e) {}
       }
 
+      // Load Saved Credentials
+      const savedCreds = localStorage.getItem('streamflix_creds');
+      if (savedCreds) {
+          try {
+              setXtreamCreds(JSON.parse(savedCreds));
+          } catch (e) {}
+      }
+
       const initLoad = async () => {
           setLoading(true);
           setLoadingStatus('Checking library...');
@@ -218,8 +226,7 @@ const App: React.FC = () => {
   const handlePlayEpisode = (episodeChannel: Channel) => {
       // When playing an episode from the modal, treating it as a 'movie' content type for player
       setCurrentChannel(episodeChannel);
-      // Add series to history, not the individual episode channel (optional choice, but Series is cleaner)
-      // Actually, let's add the Series container to history so it appears in "Recently Watched"
+      // Add Series container to history so it appears in "Recently Watched"
       if (seriesDetails) {
           const newHistory = addToHistory(seriesDetails);
           setHistory(newHistory);
@@ -268,7 +275,11 @@ const App: React.FC = () => {
       setLoading(true);
       setLoadingStatus('Connecting...');
       setAllChannels([]); setCategories([]); setRecommendations([]); await clearDB(); 
-      setXtreamCreds({ url, user, pass }); // Save creds for series info
+      
+      // SAVE CREDENTIALS
+      const creds = { url, user, pass };
+      setXtreamCreds(creds);
+      localStorage.setItem('streamflix_creds', JSON.stringify(creds));
 
       try {
         await fetchXtreamPlaylist(
@@ -293,6 +304,8 @@ const App: React.FC = () => {
         setLoading(true); setShowSettings(false); await clearDB(); 
         setIsSetupComplete(false); setCategories([]); setAllChannels([]);
         localStorage.removeItem('streamflix_languages');
+        localStorage.removeItem('streamflix_creds'); // Clear creds
+        setXtreamCreds(null);
         window.location.reload();
     }
   };
@@ -326,9 +339,6 @@ const App: React.FC = () => {
         // Map common detected langs to keys in VALID_LANGUAGES
         const normalized = lang.toLowerCase();
         // Simple check if any selected lang matches the channel lang
-        // This relies on the fact that selectedLanguages contains normalized keys like 'english', 'dutch' etc.
-        // But our `detectLanguage` returns 'English', 'Dutch' (Title case).
-        // Let's normalize both sides.
         return selectedLanguages.some(sl => sl.toLowerCase() === normalized);
     };
 
@@ -361,9 +371,6 @@ const App: React.FC = () => {
         }
         
         // Language Filter (Apply to channels)
-        // Optimization: If category language doesn't match and contains homogenous content, skip.
-        // But categories might have mixed detected langs if groupings are loose. 
-        // We filter individual channels.
         channelsInCat = channelsInCat.filter(c => isLangAllowed(c.language));
         
         if (channelsInCat.length > 0) {

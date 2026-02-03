@@ -99,13 +99,11 @@ app.get('/api/proxy', async (req, res) => {
         clearTimeout(timeout);
 
         if (!response.ok) {
-            // Forward 416 Range Not Satisfiable correctly
             if (response.status === 416) return res.sendStatus(416);
             return res.status(response.status).send(`Upstream Error: ${response.statusText}`);
         }
 
         // --- HEADER SANITIZATION ---
-        // CRITICAL: content-length must be passed for browser to enable seeking/buffering
         const safeHeaders = [
             'content-type', 
             'content-length', 
@@ -132,7 +130,6 @@ app.get('/api/proxy', async (req, res) => {
         let contentType = response.headers.get('content-type') || '';
         const lowerUrl = url.toLowerCase();
         
-        // FIX for MKV: If upstream sends generic type, force video/webm so Chrome attempts playback
         if (lowerUrl.includes('.mkv') && (contentType === 'application/octet-stream' || !contentType)) {
             contentType = 'video/webm';
             res.setHeader('Content-Type', 'video/webm');
@@ -144,9 +141,7 @@ app.get('/api/proxy', async (req, res) => {
 
         if (isM3U8) {
             // Text based processing for M3U8
-            // We buffer the playlist (it's small) to rewrite it
             try {
-                // IMPORTANT: Listen for close on the request to abort if client leaves early during buffering
                 req.on('close', () => controller.abort());
 
                 const buffer = await response.arrayBuffer();
@@ -154,31 +149,27 @@ app.get('/api/proxy', async (req, res) => {
 
                 if (text.trim().startsWith('#EXTM3U')) {
                     const baseUrl = response.url.substring(0, response.url.lastIndexOf('/') + 1);
-
                     const rewritten = text.replace(/^(?!#)(?!\s)(.+)$/gm, (match) => {
                         let target = match.trim();
                         try {
                             if (!target.startsWith('http')) {
                                 target = new URL(target, baseUrl).toString();
                             }
-                        } catch (e) { /* ignore invalid urls */ }
+                        } catch (e) { }
                         return `/api/proxy?url=${encodeURIComponent(target)}`;
                     });
 
                     res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
-                    // Recalculate content-length for modified playlist
                     res.setHeader('Content-Length', Buffer.byteLength(rewritten));
                     res.send(rewritten);
                     return;
                 } else {
-                    // Not text? Send raw.
                     res.setHeader('Content-Type', 'video/mp2t'); 
                     res.write(new Uint8Array(buffer));
                     res.end();
                     return;
                 }
             } catch (err) {
-                 // Buffer failed (maybe too large or aborted)
                  if (!res.headersSent) res.status(500).send("Playlist Error");
                  return;
             }
@@ -187,32 +178,36 @@ app.get('/api/proxy', async (req, res) => {
         // --- BINARY STREAM (TS, MP4, MKV) ---
         if (!response.body) return res.end();
         
-        // Robust piping
-        const stream = Readable.fromWeb(response.body);
+        // Robust piping with increased highWaterMark for better throughput
+        // We use Readable.fromWeb but set the buffer size on the resulting Node stream if possible.
+        const stream = Readable.fromWeb(response.body, { highWaterMark: 64 * 1024 }); 
         
-        // Cleanup: If client disconnects, we abort the upstream fetch AND destroy the stream.
+        // Cleanup: If client disconnects, we abort upstream.
         req.on('close', () => {
              controller.abort();
              if (!stream.destroyed) {
-                 stream.destroy();
+                 try { stream.destroy(); } catch (e) {}
              }
         });
 
-        // Handle stream errors (like AbortError from controller.abort()) to prevent crash
+        // Suppress errors during piping (e.g., client disconnects early)
         stream.on('error', (err) => {
-            // AbortError is expected when client closes connection
             if (err.name !== 'AbortError') {
-                console.error(`[Proxy Stream Error] ${url}:`, err.message);
+               // Silent fail on stream errors is preferred for proxy media to avoid crashing server
+               // console.error(`[Proxy Stream Error] ${url}:`, err.message);
             }
-            if (!res.writableEnded) res.end();
         });
 
-        // Pipe to response
+        res.on('error', (err) => {
+            controller.abort();
+            stream.destroy();
+        });
+
         stream.pipe(res);
 
     } catch (e) {
         if (e.name !== 'AbortError') {
-             console.error(`[Proxy Error] ${url}:`, e.message);
+             // console.error(`[Proxy Error] ${url}:`, e.message);
              if (!res.headersSent) res.status(500).send('Stream Unavailable');
         }
     }
