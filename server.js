@@ -72,19 +72,13 @@ app.get('/api/proxy', async (req, res) => {
             'Cache-Control': 'no-cache'
         };
         
-        // Forward Range headers for seeking in VODs
+        // Forward Range headers for seeking in VODs (Critical for MKV/MP4 buffering)
         if (req.headers.range) {
             headers['Range'] = req.headers.range;
         }
 
         const controller = new AbortController();
         
-        // Cleanup: If client disconnects, we abort the upstream fetch.
-        // We attach this listener immediately.
-        req.on('close', () => {
-             controller.abort();
-        });
-
         // 60s timeout for initial connection
         const timeout = setTimeout(() => controller.abort(), 60000);
 
@@ -97,13 +91,16 @@ app.get('/api/proxy', async (req, res) => {
         clearTimeout(timeout);
 
         if (!response.ok) {
+            // Forward 416 Range Not Satisfiable correctly
             if (response.status === 416) return res.sendStatus(416);
             return res.status(response.status).send(`Upstream Error: ${response.statusText}`);
         }
 
         // --- HEADER SANITIZATION ---
+        // CRITICAL: content-length must be passed for browser to enable seeking/buffering
         const safeHeaders = [
             'content-type', 
+            'content-length', 
             'accept-ranges', 
             'content-range', 
             'last-modified', 
@@ -115,15 +112,24 @@ app.get('/api/proxy', async (req, res) => {
             if (val) res.setHeader(h, val);
         });
 
+        // Set status code (important for 206 Partial Content)
+        res.status(response.status);
+
         // FORCE NO-CACHE
         res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
         res.setHeader('Pragma', 'no-cache');
         res.setHeader('Expires', '0');
 
         // Content Type Detection
-        const contentType = response.headers.get('content-type') || '';
+        let contentType = response.headers.get('content-type') || '';
         const lowerUrl = url.toLowerCase();
         
+        // FIX for MKV: If upstream sends generic type, force video/webm so Chrome attempts playback
+        if (lowerUrl.includes('.mkv') && (contentType === 'application/octet-stream' || !contentType)) {
+            contentType = 'video/webm';
+            res.setHeader('Content-Type', 'video/webm');
+        }
+
         const isM3U8 = contentType.includes('mpegurl') || 
                        contentType.includes('m3u8') || 
                        lowerUrl.includes('.m3u8');
@@ -132,6 +138,9 @@ app.get('/api/proxy', async (req, res) => {
             // Text based processing for M3U8
             // We buffer the playlist (it's small) to rewrite it
             try {
+                // IMPORTANT: Listen for close on the request to abort if client leaves early during buffering
+                req.on('close', () => controller.abort());
+
                 const buffer = await response.arrayBuffer();
                 const text = new TextDecoder().decode(buffer);
 
@@ -149,6 +158,8 @@ app.get('/api/proxy', async (req, res) => {
                     });
 
                     res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
+                    // Recalculate content-length for modified playlist
+                    res.setHeader('Content-Length', Buffer.byteLength(rewritten));
                     res.send(rewritten);
                     return;
                 } else {
@@ -171,6 +182,14 @@ app.get('/api/proxy', async (req, res) => {
         // Robust piping
         const stream = Readable.fromWeb(response.body);
         
+        // Cleanup: If client disconnects, we abort the upstream fetch AND destroy the stream.
+        req.on('close', () => {
+             controller.abort();
+             if (!stream.destroyed) {
+                 stream.destroy();
+             }
+        });
+
         // Handle stream errors (like AbortError from controller.abort()) to prevent crash
         stream.on('error', (err) => {
             // AbortError is expected when client closes connection

@@ -38,6 +38,7 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({ channel, onClose }) => {
     if (!video) return;
 
     if (hlsRef.current) {
+        hlsRef.current.stopLoad();
         hlsRef.current.destroy();
         hlsRef.current = null;
     }
@@ -96,6 +97,10 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({ channel, onClose }) => {
             levelLoadingTimeOut: 20000,
             fragLoadingTimeOut: 20000,
             startLevel: -1,
+            // Bandwidth Optimization: Reduce buffer size to prevent wasteful downloading
+            maxBufferLength: 10, 
+            maxMaxBufferLength: 20,
+            backBufferLength: 10
         };
 
         const hls = new window.Hls(hlsConfig);
@@ -163,11 +168,18 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({ channel, onClose }) => {
     video.addEventListener('playing', onPlaying);
 
     return () => {
-        if (hlsRef.current) hlsRef.current.destroy();
+        if (hlsRef.current) {
+            hlsRef.current.stopLoad(); // Immediately stop network activity
+            hlsRef.current.detachMedia();
+            hlsRef.current.destroy();
+            hlsRef.current = null;
+        }
         video.removeEventListener('error', onVideoError);
         video.removeEventListener('waiting', onWaiting);
         video.removeEventListener('playing', onPlaying);
+        
         // Clean source to stop downloading
+        video.pause();
         video.removeAttribute('src'); 
         video.load();
     };
