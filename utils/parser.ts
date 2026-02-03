@@ -162,9 +162,8 @@ export const fetchXtreamPlaylist = async (
           
           const streamId = item.stream_id || item.series_id;
           
-          // Use .m3u8 for all stream types on Xtream Codes. 
-          // Servers typically support HLS transcoding for VODs, which is better for web players (seeking/buffering).
-          const ext = 'm3u8';
+          // Use .mp4 for VODs (better native compatibility) and .m3u8 for Live
+          const ext = (type === 'live') ? 'm3u8' : 'mp4';
           
           let finalUrl = '';
           if (type === 'live') finalUrl = `${host}/live/${username}/${password}/${streamId}.${ext}`;
