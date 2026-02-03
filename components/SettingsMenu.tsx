@@ -1,4 +1,5 @@
 import React, { useRef, useState, useEffect } from 'react';
+import { VALID_LANGUAGES } from '../constants';
 
 interface SettingsMenuProps {
   isOpen: boolean;
@@ -16,10 +17,15 @@ interface SettingsMenuProps {
   isAutoConfig: boolean;
   isSyncing: boolean;
   uploadProgress?: number;
+  
+  // Language settings
+  selectedLanguages: string[];
+  onToggleLanguage: (lang: string) => void;
 }
 
 const SettingsMenu: React.FC<SettingsMenuProps> = ({ 
-  isOpen, onClose, stats, onExport, onImport, onSync, onLogout, isAutoConfig, isSyncing, uploadProgress = 0
+  isOpen, onClose, stats, onExport, onImport, onSync, onLogout, isAutoConfig, isSyncing, uploadProgress = 0,
+  selectedLanguages, onToggleLanguage
 }) => {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [serverHealth, setServerHealth] = useState<'checking' | 'online' | 'offline' | 'readonly'>('checking');
@@ -34,27 +40,17 @@ const SettingsMenu: React.FC<SettingsMenuProps> = ({
   const checkServer = async () => {
       setServerHealth('checking');
       setHealthMsg('Ping...');
-      
       try {
           const controller = new AbortController();
           const id = setTimeout(() => controller.abort(), 8000); 
-          
-          // 1. Ping Check
           const pingRes = await fetch('/api/ping', { signal: controller.signal });
           clearTimeout(id);
-
-          if (!pingRes.ok) throw new Error(`Status: ${pingRes.status} ${pingRes.statusText}`);
-
-          // Critical: Check if we actually got JSON (and not HTML/Index page)
+          if (!pingRes.ok) throw new Error(`Status: ${pingRes.status}`);
           const contentType = pingRes.headers.get('content-type');
-          if (!contentType || !contentType.includes('application/json')) {
-              throw new Error("Invalid API Response (Likely HTML)");
-          }
+          if (!contentType || !contentType.includes('application/json')) throw new Error("Invalid API Response");
 
-          // 2. Health/Write Check
           const healthRes = await fetch('/api/health');
           const healthData = await healthRes.json();
-
           if (healthData.writable) {
               setServerHealth('online');
               setHealthMsg('Connected');
@@ -62,22 +58,9 @@ const SettingsMenu: React.FC<SettingsMenuProps> = ({
               setServerHealth('readonly');
               setHealthMsg('Read-Only');
           }
-
       } catch (e: any) {
-          console.error("Connection Check Failed:", e);
           setServerHealth('offline');
-          
-          // Map technical errors to user-friendly messages
-          let msg = e.message || 'Unknown Error';
-          
-          if (msg.includes('Failed to fetch')) msg = 'Network Error';
-          if (msg.includes('AbortError') || msg.includes('aborted')) msg = 'Timeout';
-          if (msg.includes('HTML')) msg = 'API Route Missing';
-          if (msg.includes('500')) msg = 'Server Error (500)';
-          if (msg.includes('502')) msg = 'Bad Gateway (502)';
-          if (msg.includes('404')) msg = 'API Not Found (404)';
-          
-          setHealthMsg(msg);
+          setHealthMsg('Offline');
       }
   };
 
@@ -90,118 +73,104 @@ const SettingsMenu: React.FC<SettingsMenuProps> = ({
     }
   };
 
+  // Capitalize helper
+  const cap = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
+
   return (
     <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/80 backdrop-blur-sm p-4">
-      <div className="bg-[#181818] w-full max-w-md p-6 rounded-lg shadow-2xl border border-gray-800 relative">
+      <div className="bg-[#181818] w-full max-w-2xl p-6 rounded-xl shadow-2xl border border-gray-800 relative max-h-[90vh] overflow-y-auto">
         <button 
           onClick={onClose}
-          className="absolute top-4 right-4 text-gray-400 hover:text-white bg-gray-800 rounded-full p-1 transition"
+          className="absolute top-4 right-4 text-gray-400 hover:text-white bg-gray-800 rounded-full p-2 transition"
         >
-          <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-5 h-5">
+          <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-5 h-5">
             <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
           </svg>
         </button>
 
-        <div className="flex items-center gap-3 mb-6">
-            <h2 className="text-2xl font-bold text-white">Settings</h2>
-            
-            {/* Server Status Badge */}
-            <div 
-                className={`flex items-center gap-2 px-3 py-1 rounded-full text-xs font-bold border ${
-                    serverHealth === 'online' ? 'bg-green-900/30 border-green-800 text-green-400' :
-                    serverHealth === 'checking' ? 'bg-blue-900/30 border-blue-800 text-blue-400' :
-                    serverHealth === 'readonly' ? 'bg-yellow-900/30 border-yellow-800 text-yellow-400' :
-                    'bg-red-900/30 border-red-800 text-red-400'
-                }`}
-                title={healthMsg}
-            >
-                <div className={`w-2 h-2 rounded-full ${
-                    serverHealth === 'online' ? 'bg-green-500 shadow-[0_0_5px_#22c55e]' :
-                    serverHealth === 'checking' ? 'bg-blue-500 animate-pulse' :
-                    serverHealth === 'readonly' ? 'bg-yellow-500' :
-                    'bg-red-500'
-                }`}></div>
-                <span className="max-w-[180px] truncate">{healthMsg}</span>
-                {serverHealth === 'offline' && (
-                    <button onClick={checkServer} className="ml-1 hover:text-white" title="Retry">↻</button>
-                )}
-            </div>
-        </div>
+        <h2 className="text-3xl font-bold text-white mb-6">Settings</h2>
 
-        <div className="space-y-6">
-          <div className="bg-[#222] p-4 rounded border border-gray-700">
-            <h3 className="text-gray-400 text-xs font-bold uppercase mb-4 tracking-wider">Library Stats</h3>
-            <div className="grid grid-cols-2 gap-4">
-              <div className="flex flex-col p-2 bg-[#2a2a2a] rounded">
-                <span className="text-xl font-bold text-white">{stats.live}</span>
-                <span className="text-[10px] text-gray-400 uppercase">Live Channels</span>
-              </div>
-              <div className="flex flex-col p-2 bg-[#2a2a2a] rounded">
-                <span className="text-xl font-bold text-white">{stats.movies}</span>
-                <span className="text-[10px] text-gray-400 uppercase">Movies</span>
-              </div>
-              <div className="flex flex-col p-2 bg-[#2a2a2a] rounded">
-                <span className="text-xl font-bold text-white">{stats.series}</span>
-                <span className="text-[10px] text-gray-400 uppercase">Episodes</span>
-              </div>
-              <div className="flex flex-col p-2 bg-[#2a2a2a] rounded border border-red-900/30">
-                <span className="text-xl font-bold text-red-500">{stats.total}</span>
-                <span className="text-[10px] text-gray-400 uppercase">Total Assets</span>
-              </div>
-            </div>
-          </div>
-
-          <div className="space-y-3 pt-2">
-             <input type="file" accept=".json" ref={fileInputRef} onChange={handleFileChange} className="hidden" />
-
-             <div className="w-full">
-                <button 
-                    onClick={onSync}
-                    disabled={isSyncing || serverHealth !== 'online'}
-                    className={`w-full font-bold py-3 rounded flex items-center justify-center gap-2 transition text-sm shadow-lg ${
-                        serverHealth === 'online' 
-                            ? 'bg-red-600 hover:bg-red-700 text-white shadow-red-900/20' 
-                            : 'bg-gray-800 text-gray-500 cursor-not-allowed'
-                    }`}
-                >
-                    {isSyncing ? (
-                        <div className="w-5 h-5 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
-                    ) : (
-                        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-5 h-5">
-                            <path strokeLinecap="round" strokeLinejoin="round" d="M12 16.5V9.75m0 0 3 3m-3-3-3 3M6.75 19.5a4.5 4.5 0 0 1-1.41-8.775 5.25 5.25 0 0 1 10.233-2.33 3 3 0 0 1 3.758 3.848A3.752 3.752 0 0 1 18 19.5H6.75Z" />
-                        </svg>
-                    )}
-                    {isSyncing ? "Uploading..." : "Upload to Server"}
-                </button>
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
+            {/* Column 1: Library & System */}
+            <div className="space-y-6">
                 
-                {serverHealth !== 'online' && !isSyncing && (
-                    <p className="text-[10px] text-red-400 text-center mt-1">
-                        {healthMsg === 'API Route Missing' 
-                           ? "Error: Frontend running without Backend. Check Docker command." 
-                           : "Connection failed. Check server logs."}
-                    </p>
-                )}
-
-                {isSyncing && (
-                    <div className="w-full bg-gray-700 rounded-full h-2.5 mt-2">
-                        <div className="bg-red-600 h-2.5 rounded-full transition-all duration-300" style={{ width: `${uploadProgress}%` }}></div>
+                {/* Stats */}
+                <div className="bg-[#222] p-4 rounded-lg border border-gray-700">
+                    <h3 className="text-gray-400 text-xs font-bold uppercase mb-4 tracking-wider">Library Stats</h3>
+                    <div className="grid grid-cols-2 gap-3">
+                        <div className="bg-[#1a1a1a] p-2 rounded text-center">
+                            <span className="block text-xl font-bold text-white">{stats.live}</span>
+                            <span className="text-[10px] text-gray-500 uppercase">Live</span>
+                        </div>
+                        <div className="bg-[#1a1a1a] p-2 rounded text-center">
+                            <span className="block text-xl font-bold text-white">{stats.movies}</span>
+                            <span className="text-[10px] text-gray-500 uppercase">Movies</span>
+                        </div>
+                        <div className="bg-[#1a1a1a] p-2 rounded text-center">
+                            <span className="block text-xl font-bold text-white">{stats.series}</span>
+                            <span className="text-[10px] text-gray-500 uppercase">Series</span>
+                        </div>
+                        <div className="bg-[#1a1a1a] p-2 rounded text-center border border-red-900/50">
+                            <span className="block text-xl font-bold text-red-500">{stats.total}</span>
+                            <span className="text-[10px] text-gray-500 uppercase">Total</span>
+                        </div>
                     </div>
-                )}
-             </div>
+                </div>
 
-             <div className="grid grid-cols-2 gap-2">
-                 <button onClick={onExport} className="bg-gray-700 hover:bg-gray-600 text-white font-medium py-2 rounded flex items-center justify-center gap-2 transition text-xs">
-                    Save JSON
-                 </button>
-                 <button onClick={() => fileInputRef.current?.click()} className="bg-gray-700 hover:bg-gray-600 text-white font-medium py-2 rounded flex items-center justify-center gap-2 transition text-xs">
-                    Load JSON
-                 </button>
-             </div>
+                {/* Actions */}
+                <div className="space-y-3">
+                    <input type="file" accept=".json" ref={fileInputRef} onChange={handleFileChange} className="hidden" />
+                    
+                    <button 
+                        onClick={onSync}
+                        disabled={isSyncing || serverHealth !== 'online'}
+                        className={`w-full font-bold py-3 rounded flex items-center justify-center gap-2 transition text-sm ${
+                            serverHealth === 'online' 
+                                ? 'bg-red-600 hover:bg-red-700 text-white' 
+                                : 'bg-gray-700 text-gray-400 cursor-not-allowed'
+                        }`}
+                    >
+                        {isSyncing ? "Syncing..." : "Sync to Server"}
+                    </button>
+                    {isSyncing && <div className="h-1 bg-gray-700 w-full"><div className="h-full bg-red-600" style={{width: `${uploadProgress}%`}}></div></div>}
+                    
+                    <div className="grid grid-cols-2 gap-3">
+                        <button onClick={onExport} className="bg-gray-700 hover:bg-gray-600 text-white py-2 rounded text-xs font-bold">Backup JSON</button>
+                        <button onClick={() => fileInputRef.current?.click()} className="bg-gray-700 hover:bg-gray-600 text-white py-2 rounded text-xs font-bold">Restore JSON</button>
+                    </div>
 
-             <button onClick={onLogout} className="w-full bg-transparent border border-gray-600 text-gray-300 hover:border-red-600 hover:text-red-500 font-medium py-3 rounded transition text-sm mt-2">
-                {isAutoConfig ? "Reload Server Content" : "Logout & Clear Data"}
-             </button>
-          </div>
+                    <button onClick={onLogout} className="w-full text-red-500 hover:bg-red-900/20 py-3 rounded text-sm font-bold border border-transparent hover:border-red-900 transition">
+                        {isAutoConfig ? "Reload Server Data" : "Log Out & Clear Data"}
+                    </button>
+                </div>
+            </div>
+
+            {/* Column 2: Language Filters */}
+            <div>
+                <h3 className="text-gray-400 text-xs font-bold uppercase mb-4 tracking-wider">Content Languages</h3>
+                <p className="text-xs text-gray-500 mb-4">Select the languages you want to see in your library.</p>
+                
+                <div className="grid grid-cols-2 gap-3 max-h-[300px] overflow-y-auto pr-2 custom-scrollbar">
+                    {VALID_LANGUAGES.map(lang => (
+                        <label key={lang} className="flex items-center space-x-3 bg-[#222] p-3 rounded cursor-pointer hover:bg-[#2a2a2a] transition border border-transparent hover:border-gray-600">
+                            <div className={`w-5 h-5 rounded border flex items-center justify-center ${selectedLanguages.includes(lang) ? 'bg-red-600 border-red-600' : 'border-gray-500'}`}>
+                                {selectedLanguages.includes(lang) && (
+                                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-3.5 h-3.5 text-white">
+                                        <path fillRule="evenodd" d="M16.704 4.153a.75.75 0 01.143 1.052l-8 10.5a.75.75 0 01-1.127.075l-4.5-4.5a.75.75 0 011.06-1.06l3.894 3.893 7.48-9.817a.75.75 0 011.05-.143z" clipRule="evenodd" />
+                                    </svg>
+                                )}
+                            </div>
+                            <span className="text-sm text-gray-200 font-medium capitalize">{cap(lang)}</span>
+                            <input 
+                                type="checkbox" 
+                                className="hidden"
+                                checked={selectedLanguages.includes(lang)}
+                                onChange={() => onToggleLanguage(lang)}
+                            />
+                        </label>
+                    ))}
+                </div>
+            </div>
         </div>
       </div>
     </div>

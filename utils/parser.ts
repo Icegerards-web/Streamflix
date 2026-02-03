@@ -1,4 +1,4 @@
-import { Channel, Category } from '../types';
+import { Channel, Category, SeriesDetailsData, SeriesEpisode } from '../types';
 import { VALID_LANGUAGES } from '../constants';
 
 // Pre-compile Regex for performance
@@ -131,6 +131,38 @@ export const fetchUrlContent = async (url: string, type: 'json' | 'text' = 'text
 
 // Xtream Codes Support
 
+export const fetchXtreamSeriesDetails = async (
+    baseUrl: string, username: string, password: string, seriesId: string
+): Promise<SeriesDetailsData | null> => {
+    try {
+        let host = baseUrl.trim();
+        if (host.endsWith('/')) host = host.slice(0, -1);
+        if (!host.startsWith('http')) host = `http://${host}`;
+        
+        const url = `${host}/player_api.php?username=${username}&password=${password}&action=get_series_info&series_id=${seriesId}`;
+        const data = await fetchUrlContent(url, 'json');
+        
+        if (!data || !data.episodes) return null;
+
+        return {
+            info: {
+                name: data.info?.name || 'Unknown Series',
+                cover: data.info?.cover || '',
+                plot: data.info?.plot || '',
+                cast: data.info?.cast || '',
+                director: data.info?.director || '',
+                genre: data.info?.genre || '',
+                releaseDate: data.info?.releaseDate || '',
+                rating: data.info?.rating || ''
+            },
+            episodes: data.episodes
+        };
+    } catch (e) {
+        console.error("Failed to fetch series info", e);
+        return null;
+    }
+};
+
 export const fetchXtreamPlaylist = async (
   baseUrl: string, 
   username: string, 
@@ -173,13 +205,16 @@ export const fetchXtreamPlaylist = async (
           const groupName = catMap.get(cid) || (type === 'live' ? 'Live TV' : type === 'movie' ? 'Movies' : 'Series');
 
           results.push({
-              id: `${type}_${streamId}`,
+              id: type === 'series' ? `series_${streamId}` : `${type}_${streamId}`,
               name: name,
               logo: item.stream_icon || item.cover || item.cover_big,
               group: groupName,
               url: finalUrl,
               contentType: type === 'series' ? 'series' : (type === 'movie' ? 'movie' : 'live'),
-              language: detectLanguage(groupName)
+              language: detectLanguage(groupName),
+              seriesId: type === 'series' ? String(streamId) : undefined,
+              rating: item.rating,
+              year: item.year
           });
       }
       return results;
@@ -207,7 +242,7 @@ export const fetchXtreamPlaylist = async (
       processCategories('get_series_categories', seriesCatIds, 'Series')
   ]);
 
-  if (liveCatIds.length === 0 && vodCatIds.length === 0) {
+  if (liveCatIds.length === 0 && vodCatIds.length === 0 && seriesCatIds.length === 0) {
       throw new Error("No categories found on server.");
   }
 
