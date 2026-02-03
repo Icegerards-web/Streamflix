@@ -64,7 +64,7 @@ app.get('/api/proxy', async (req, res) => {
     if (!url || typeof url !== 'string') return res.status(400).send('Url required');
 
     try {
-        // Standard Browser User-Agent
+        // Standard Browser User-Agent to avoid blocking
         const headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
             'Accept': '*/*',
@@ -78,6 +78,12 @@ app.get('/api/proxy', async (req, res) => {
         }
 
         const controller = new AbortController();
+        
+        // Cleanup Optimization: If client disconnects, kill upstream immediately
+        req.on('close', () => {
+             controller.abort();
+        });
+
         // 60s timeout for initial connection
         const timeout = setTimeout(() => controller.abort(), 60000);
 
@@ -95,10 +101,6 @@ app.get('/api/proxy', async (req, res) => {
         }
 
         // --- HEADER SANITIZATION ---
-        // CRITICAL: Do NOT forward Content-Length or Content-Encoding.
-        // Fetch decompresses responses automatically, so the upstream Content-Length 
-        // refers to the compressed size, while we are sending decompressed bytes.
-        // This mismatch causes ERR_HTTP2_PROTOCOL_ERROR and 502s.
         const safeHeaders = [
             'content-type', 
             'accept-ranges', 
@@ -112,7 +114,7 @@ app.get('/api/proxy', async (req, res) => {
             if (val) res.setHeader(h, val);
         });
 
-        // FORCE NO-CACHE: Vital for live streams to prevent old segments from sticking
+        // FORCE NO-CACHE
         res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
         res.setHeader('Pragma', 'no-cache');
         res.setHeader('Expires', '0');
@@ -133,30 +135,23 @@ app.get('/api/proxy', async (req, res) => {
             if (text.trim().startsWith('#EXTM3U')) {
                 const baseUrl = response.url.substring(0, response.url.lastIndexOf('/') + 1);
 
-                // Rewrite logic: Fix all internal URLs to point to this proxy
-                // CRITICAL FIX: Use root-relative paths (`/api/proxy?...`) instead of absolute URLs (`http://...`).
-                // This ensures the browser uses the current protocol (HTTPS) and domain automatically,
-                // fixing Mixed Content errors when the server is behind a proxy.
+                // Rewrite logic to force proxy for child segments (Recursive Proxy)
                 const rewritten = text.replace(/^(?!#)(?!\s)(.+)$/gm, (match) => {
                     let target = match.trim();
-                    // If it's relative, make it absolute
                     try {
                         if (!target.startsWith('http')) {
                             target = new URL(target, baseUrl).toString();
                         }
                     } catch (e) { /* ignore invalid urls */ }
                     
-                    // Recursive Proxy (Relative Path)
                     return `/api/proxy?url=${encodeURIComponent(target)}`;
                 });
 
-                // Set correct content type for HLS
                 res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
                 res.send(rewritten);
                 return;
             } else {
-                // False alarm: Server sent binary data (TS) but labeled it m3u8.
-                // Treat as binary stream.
+                // False alarm: Server sent binary data but labeled it m3u8.
                 res.setHeader('Content-Type', 'video/mp2t'); 
                 // Fallthrough to binary pipe...
                 // @ts-ignore
@@ -179,8 +174,8 @@ app.get('/api/proxy', async (req, res) => {
     } catch (e) {
         if (e.name !== 'AbortError') {
              console.error(`[Proxy Error] ${url}:`, e.message);
+             if (!res.headersSent) res.status(500).send('Stream Unavailable');
         }
-        if (!res.headersSent) res.status(500).send('Stream Unavailable');
     }
 });
 

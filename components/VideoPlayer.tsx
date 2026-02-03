@@ -12,25 +12,27 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({ channel, onClose }) => {
   
   const isHttps = typeof window !== 'undefined' && window.location.protocol === 'https:';
   const isHttpStream = channel.url.startsWith('http:');
-  const isLive = channel.contentType === 'live' || channel.url.includes('.m3u8');
   
-  // Always proxy HTTP streams on HTTPS to prevent Mixed Content.
-  // Always proxy Live streams to fix CORS and stability issues.
-  const mustProxy = (isHttps && isHttpStream) || isLive;
-  const [useProxy, setUseProxy] = useState(mustProxy);
+  // OPTIMIZATION:
+  // Only force proxy if strictly required by browser security (Mixed Content).
+  // Previously we forced proxy for all Live streams, which overloaded the server.
+  // Now we try direct play first. If CORS/Network fails, we auto-switch to proxy.
+  const isMixedContent = isHttps && isHttpStream;
+  const [useProxy, setUseProxy] = useState(isMixedContent);
   
   const [error, setError] = useState<string | null>(null);
   const [status, setStatus] = useState<'initializing' | 'playing' | 'buffering' | 'error'>('initializing');
   const [debugMsg, setDebugMsg] = useState('Initializing...');
+  const [retryCount, setRetryCount] = useState(0);
 
   useEffect(() => {
     // Reset state on channel change
-    const shouldProxy = (isHttps && isHttpStream) || isLive;
-    setUseProxy(shouldProxy);
-    
+    const mixed = (typeof window !== 'undefined' && window.location.protocol === 'https:' && channel.url.startsWith('http:'));
+    setUseProxy(mixed);
     setError(null);
     setStatus('initializing');
     setDebugMsg('Loading stream...');
+    setRetryCount(0);
   }, [channel]);
 
   // Main Player Logic
@@ -47,9 +49,10 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({ channel, onClose }) => {
         ? `/api/proxy?url=${encodeURIComponent(channel.url)}` 
         : channel.url;
     
-    console.log(`[Player] Loading: ${streamUrl}`);
+    console.log(`[Player] Loading: ${streamUrl} (Proxy: ${useProxy})`);
     
-    if (useProxy) setDebugMsg('Connecting...');
+    if (useProxy) setDebugMsg('Connecting via Relay...');
+    else setDebugMsg('Connecting to Source...');
 
     // Detect if HLS
     const isM3U8 = streamUrl.toLowerCase().includes('.m3u8') || 
@@ -63,10 +66,12 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({ channel, onClose }) => {
     const handleFailure = (msg: string) => {
         console.warn(`[Player Error] ${msg}`);
         
-        // Try proxy if we haven't yet
+        // Critical Optimization: Smart Fallback
+        // If direct play failed, switch to proxy immediately.
         if (!useProxy && !streamUrl.includes('/api/proxy')) {
-            console.log("Switching to Secure Proxy...");
+            console.log("Direct connection failed (CORS/Network). Switching to Proxy...");
             setUseProxy(true);
+            setRetryCount(prev => prev + 1);
             return;
         }
 
@@ -76,38 +81,17 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({ channel, onClose }) => {
 
     if (isM3U8 && window.Hls && window.Hls.isSupported()) {
         
-        // CONFIGURATION: Tuned for Low Latency without sacrificing Stability
-        const hlsConfig = isLive 
-        ? {
-            // LIVE SETTINGS
+        // CONFIGURATION: Optimized for faster load times
+        const hlsConfig = {
             enableWorker: true,
-            lowLatencyMode: false, // Keep false for maximum compatibility
+            // Fetch loader tweaks for faster initial connection
+            manifestLoadingTimeOut: 20000, 
+            manifestLoadingMaxRetry: 2,
+            levelLoadingTimeOut: 20000,
+            fragLoadingTimeOut: 20000,
             
-            // Latency Control: 
-            // Reduced from 5 to 3 to start closer to live edge (approx 20s-30s delay instead of 60s)
-            liveSyncDurationCount: 3, 
-            // Cap max latency to prevent drifting too far back
-            liveMaxLatencyDurationCount: 6,
-            
-            // Buffer Strategy: Reduced for live to prevent lagging behind
-            backBufferLength: 30,
-            maxBufferLength: 12, 
-            
-            // Generous Timeouts (Keep these for stability)
-            manifestLoadingTimeOut: 30000,
-            levelLoadingTimeOut: 30000,
-            fragLoadingTimeOut: 30000,
-        } 
-        : {
-            // VOD SETTINGS
-            enableWorker: true,
-            lowLatencyMode: false,
-            backBufferLength: 90,
-            maxBufferLength: 60,
-            maxMaxBufferLength: 600,
-            manifestLoadingTimeOut: 30000,
-            levelLoadingTimeOut: 30000,
-            fragLoadingTimeOut: 30000,
+            // Buffer tweaks
+            startLevel: -1, // Auto start quality
         };
 
         const hls = new window.Hls(hlsConfig);
@@ -125,6 +109,11 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({ channel, onClose }) => {
             if (data.fatal) {
                 switch (data.type) {
                     case window.Hls.ErrorTypes.NETWORK_ERROR:
+                        // Immediate switch on network error during manifest load
+                        if (data.details === 'manifestLoadError' && !useProxy) {
+                             handleFailure("Network access denied");
+                             return;
+                        }
                         console.warn("HLS Network Error - Retrying...");
                         hls.startLoad(); 
                         break;
@@ -144,6 +133,8 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({ channel, onClose }) => {
         // Safari Native HLS
         video.src = streamUrl;
         video.play().catch(() => {});
+        
+        // Safari doesn't give detailed error types easily, but 'error' event will catch it
     } else {
         // Native MP4/MKV
         video.src = streamUrl;
@@ -178,7 +169,7 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({ channel, onClose }) => {
         video.removeEventListener('waiting', onWaiting);
         video.removeEventListener('playing', onPlaying);
     };
-  }, [channel, useProxy]);
+  }, [channel, useProxy, retryCount]);
 
   return (
     <div className="fixed inset-0 z-50 bg-black flex flex-col">
@@ -222,12 +213,20 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({ channel, onClose }) => {
                            The connection to the provider was lost or timed out.
                         </span>
                     </p>
-                    <button 
-                        onClick={() => { setStatus('initializing'); setUseProxy(true); }}
-                        className="bg-white text-black font-bold py-2 px-6 rounded hover:bg-gray-200 transition"
-                    >
-                        Retry Connection
-                    </button>
+                    <div className="flex justify-center gap-4">
+                        <button 
+                            onClick={() => { setStatus('initializing'); setRetryCount(prev => prev + 1); }}
+                            className="bg-gray-700 text-white font-bold py-2 px-6 rounded hover:bg-gray-600 transition"
+                        >
+                            Retry
+                        </button>
+                        <button 
+                            onClick={() => { setStatus('initializing'); setUseProxy(true); setRetryCount(prev => prev + 1); }}
+                            className="bg-white text-black font-bold py-2 px-6 rounded hover:bg-gray-200 transition"
+                        >
+                            Force Proxy
+                        </button>
+                    </div>
                 </div>
             </div>
         )}
