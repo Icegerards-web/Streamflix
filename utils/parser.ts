@@ -2,7 +2,6 @@ import { Channel, Category } from '../types';
 import { VALID_LANGUAGES } from '../constants';
 
 // Pre-compile Regex for performance
-// We use this to PRIORITIZE loading, not to filter out.
 const PRIORITY_REGEX = new RegExp(`\\b(${VALID_LANGUAGES.join('|')})\\b`, 'i');
 
 export const isPriorityMatch = (text: string): boolean => {
@@ -22,23 +21,6 @@ export const detectLanguage = (text: string): string => {
    if (/\b(pt|portuguese|brazil)\b/.test(lower)) return 'Portuguese';
    if (/\b(ar|arabic)\b/.test(lower)) return 'Arabic';
    return 'Other';
-};
-
-// Helper to convert MKV/AVI/MP4 Xtream URLs to HLS (m3u8)
-const normalizeXtreamUrl = (url: string): string => {
-    // Regex for standard Xtream Codes VOD structure: /movie/user/pass/id.ext
-    const xcRegex = /^(https?:\/\/[^/]+)\/(movie|series)\/([^/]+)\/([^/]+)\/(\d+)\.(.+)$/i;
-    const match = url.match(xcRegex);
-    
-    if (match) {
-        const ext = match[6].toLowerCase();
-        // If it's not m3u8, force it. Browsers can't play MKV/AVI natively.
-        // Xtream servers generally support on-the-fly transcoding/remuxing to HLS.
-        if (ext !== 'm3u8') {
-             return `${match[1]}/${match[2]}/${match[3]}/${match[4]}/${match[5]}.m3u8`;
-        }
-    }
-    return url;
 };
 
 export const parseM3U = (content: string): { categories: Category[], allChannels: Channel[] } => {
@@ -67,13 +49,9 @@ export const parseM3U = (content: string): { categories: Category[], allChannels
       };
     } else if (line && !line.startsWith('#')) {
        if (currentChannel.name) {
-         let url = line;
-         // Normalize URL for browser compatibility
-         url = normalizeXtreamUrl(url);
-
-         // Determine content type (simple heuristic)
-         // If we converted to m3u8 from a movie path, it's a movie.
-         const isVod = url.includes('/movie/') || url.includes('/series/') || line.match(/\.(mp4|mkv|avi|mov|wmv|flv)$/i);
+         const url = line;
+         // Simple heuristic for content type
+         const isVod = url.includes('/movie/') || url.includes('/series/') || url.match(/\.(mp4|mkv|avi|mov|wmv|flv)$/i);
          
          channels.push({
              ...currentChannel,
@@ -94,9 +72,8 @@ export const parseM3U = (content: string): { categories: Category[], allChannels
   if (start < content.length) {
       const line = content.substring(start).trim();
       if (line && !line.startsWith('#') && currentChannel.name) {
-          let url = line;
-          url = normalizeXtreamUrl(url);
-          const isVod = url.includes('/movie/') || url.includes('/series/') || line.match(/\.(mp4|mkv|avi|mov|wmv|flv)$/i);
+          const url = line;
+          const isVod = url.includes('/movie/') || url.includes('/series/') || url.match(/\.(mp4|mkv|avi|mov|wmv|flv)$/i);
 
           channels.push({
               ...currentChannel,
@@ -142,38 +119,14 @@ const fetchWithTimeout = async (url: string, timeout = 30000): Promise<Response>
     }
 };
 
-const PROXIES = [
-    (url: string) => `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`,
-    (url: string) => `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(url)}`,
-    (url: string) => `https://corsproxy.io/?${encodeURIComponent(url)}`
-];
-
 export const fetchUrlContent = async (url: string, type: 'json' | 'text' = 'text'): Promise<any> => {
     try {
         const res = await fetchWithTimeout(url, 15000); 
         if (res.ok) return type === 'json' ? await res.json() : await res.text();
-    } catch (e) { /* ignore */ }
-
-    for (const proxyGen of PROXIES) {
-        try {
-            const proxyUrl = proxyGen(url);
-            const res = await fetchWithTimeout(proxyUrl, 60000); 
-            
-            if (res.ok) {
-                if (type === 'json') {
-                    const text = await res.text();
-                    try {
-                        return JSON.parse(text);
-                    } catch (jsonErr) {
-                        continue; 
-                    }
-                }
-                return await res.text();
-            }
-        } catch (e) { /* ignore */ }
+    } catch (e) { 
+        throw new Error(`Failed to load content. Please check your URL and internet connection.`);
     }
-    
-    throw new Error(`Failed to load content. Please check your URL and internet connection.`);
+    throw new Error(`Failed to load content.`);
 };
 
 // Xtream Codes Support
@@ -209,11 +162,12 @@ export const fetchXtreamPlaylist = async (
           
           const streamId = item.stream_id || item.series_id;
           
-          // FORCE .m3u8 for better web compatibility (HLS)
-          const ext = 'm3u8'; 
+          // Use .m3u8 for all stream types on Xtream Codes. 
+          // Servers typically support HLS transcoding for VODs, which is better for web players (seeking/buffering).
+          const ext = 'm3u8';
           
           let finalUrl = '';
-          if (type === 'live') finalUrl = `${host}/live/${username}/${password}/${streamId}.m3u8`;
+          if (type === 'live') finalUrl = `${host}/live/${username}/${password}/${streamId}.${ext}`;
           else if (type === 'movie') finalUrl = `${host}/movie/${username}/${password}/${streamId}.${ext}`;
           else if (type === 'series') finalUrl = `${host}/series/${username}/${password}/${streamId}.${ext}`; 
           
