@@ -64,21 +64,22 @@ app.get('/api/proxy', async (req, res) => {
     if (!url || typeof url !== 'string') return res.status(400).send('Url required');
 
     try {
-        // Use a standard Browser User-Agent to look like legitimate web traffic
+        // Standard Browser User-Agent
         const headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
             'Accept': '*/*',
-            'Connection': 'keep-alive'
+            'Connection': 'keep-alive',
+            'Cache-Control': 'no-cache'
         };
         
-        // Critical: Forward Range headers exactly as received
-        // This allows the browser to request specific byte chunks (seeking, loading large files)
+        // Forward Range headers for seeking in VODs
         if (req.headers.range) {
             headers['Range'] = req.headers.range;
         }
 
         const controller = new AbortController();
-        const timeout = setTimeout(() => controller.abort(), 60000); // 60s timeout for slow streams
+        // 60s timeout for initial connection
+        const timeout = setTimeout(() => controller.abort(), 60000);
 
         const response = await fetch(url, { 
             headers, 
@@ -89,15 +90,22 @@ app.get('/api/proxy', async (req, res) => {
         clearTimeout(timeout);
 
         if (!response.ok) {
-            // Forward 416 Range Not Satisfiable correctly
-            if (response.status === 416) {
-                 return res.sendStatus(416);
-            }
+            if (response.status === 416) return res.sendStatus(416);
             return res.status(response.status).send(`Upstream Error: ${response.statusText}`);
         }
 
-        // Forward vital headers
-        const safeHeaders = ['content-type', 'content-length', 'accept-ranges', 'content-range', 'last-modified', 'etag'];
+        // --- HEADER SANITIZATION ---
+        // CRITICAL: Do NOT forward Content-Length or Content-Encoding blindly.
+        // Node's response object handles chunking and compression automatically.
+        // Forwarding mismatched headers causes ERR_HTTP2_PROTOCOL_ERROR and 502s.
+        const safeHeaders = [
+            'content-type', 
+            'accept-ranges', 
+            'content-range', 
+            'last-modified', 
+            'etag'
+        ];
+        
         safeHeaders.forEach(h => {
             const val = response.headers.get(h);
             if (val) res.setHeader(h, val);
@@ -107,8 +115,6 @@ app.get('/api/proxy', async (req, res) => {
         const contentType = response.headers.get('content-type') || '';
         const lowerUrl = url.toLowerCase();
         
-        // Robust M3U8 Detection
-        // Checks content-type OR file extension in URL (handling query params)
         const isM3U8 = contentType.includes('mpegurl') || 
                        contentType.includes('m3u8') || 
                        lowerUrl.includes('.m3u8');
@@ -124,21 +130,30 @@ app.get('/api/proxy', async (req, res) => {
                 const protocol = req.protocol;
 
                 // Rewrite logic: Fix all internal URLs to point to this proxy
+                // This regex captures lines that don't start with # and aren't whitespace
                 const rewritten = text.replace(/^(?!#)(?!\s)(.+)$/gm, (match) => {
                     let target = match.trim();
+                    // If it's relative, make it absolute
                     try {
                         if (!target.startsWith('http')) {
                             target = new URL(target, baseUrl).toString();
                         }
-                    } catch (e) { /* ignore */ }
+                    } catch (e) { /* ignore invalid urls */ }
+                    
+                    // Recursive Proxy
                     return `${protocol}://${myHost}/api/proxy?url=${encodeURIComponent(target)}`;
                 });
 
+                // Set correct content type for HLS
                 res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
+                // We do NOT set Content-Length here; Express will calculate it or chunk it.
                 res.send(rewritten);
                 return;
             } else {
-                // False alarm, treat as binary (sometimes servers send .ts as .m3u8 mime type erroneously)
+                // False alarm: Server sent binary data (TS) but labeled it m3u8.
+                // Treat as binary stream.
+                res.setHeader('Content-Type', 'video/mp2t'); 
+                // Fallthrough to binary pipe...
                 // @ts-ignore
                 Readable.fromWeb(new ReadableStream({
                     start(controller) {
@@ -150,7 +165,12 @@ app.get('/api/proxy', async (req, res) => {
             }
         }
 
-        // Standard Pipe for MP4/MKV/TS
+        // --- BINARY STREAM (TS, MP4, MKV) ---
+        
+        // Only forward content-length for direct binary pipes where we don't touch the body
+        const len = response.headers.get('content-length');
+        if (len) res.setHeader('Content-Length', len);
+
         if (!response.body) return res.end();
         
         // @ts-ignore

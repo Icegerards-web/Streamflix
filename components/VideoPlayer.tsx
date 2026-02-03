@@ -14,9 +14,10 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({ channel, onClose }) => {
   const isHttpStream = channel.url.startsWith('http:');
   const isLive = channel.contentType === 'live' || channel.url.includes('.m3u8');
   
-  // Mixed Content Rule: If App is HTTPS and Stream is HTTP, we MUST proxy.
-  const mustProxy = isHttps && isHttpStream;
-  const [useProxy, setUseProxy] = useState(mustProxy || isLive);
+  // Rule: HTTPS App + HTTP Stream = Proxy Required (Mixed Content)
+  // Also proxy Live streams generally to fix CORS issues.
+  const mustProxy = (isHttps && isHttpStream) || isLive;
+  const [useProxy, setUseProxy] = useState(mustProxy);
   
   const [error, setError] = useState<string | null>(null);
   const [status, setStatus] = useState<'initializing' | 'playing' | 'buffering' | 'error'>('initializing');
@@ -62,7 +63,7 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({ channel, onClose }) => {
     const handleFailure = (msg: string) => {
         console.warn(`[Player Error] ${msg}`);
         
-        // Try proxy if we haven't yet (unless we know we must use it)
+        // Try proxy if we haven't yet
         if (!useProxy && !streamUrl.includes('/api/proxy')) {
             console.log("Switching to Secure Proxy...");
             setUseProxy(true);
@@ -74,17 +75,33 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({ channel, onClose }) => {
     };
 
     if (isM3U8 && window.Hls && window.Hls.isSupported()) {
-        const hls = new window.Hls({
+        
+        // CONFIGURATION: Different settings for Live vs Movies (VOD)
+        const hlsConfig = isLive 
+        ? {
+            // LIVE SETTINGS (Stability over Buffer)
             enableWorker: true,
-            // STABILITY SETTINGS
-            lowLatencyMode: false, // Critical: Disable low latency to prevent buffering
+            lowLatencyMode: false,
+            backBufferLength: 30,
+            maxBufferLength: 10, // Small buffer for live to prevent stalling
+            liveSyncDurationCount: 3, // Stay 3 segments behind live edge
+            manifestLoadingTimeOut: 20000,
+            levelLoadingTimeOut: 20000,
+            fragLoadingTimeOut: 20000,
+        } 
+        : {
+            // VOD SETTINGS (Max Buffer for Smoothness)
+            enableWorker: true,
+            lowLatencyMode: false,
             backBufferLength: 90,
-            maxBufferLength: 60, // Buffer up to 60s ahead
+            maxBufferLength: 60, // 60s buffer for movies
             maxMaxBufferLength: 600,
             manifestLoadingTimeOut: 30000,
             levelLoadingTimeOut: 30000,
             fragLoadingTimeOut: 30000,
-        });
+        };
+
+        const hls = new window.Hls(hlsConfig);
         hlsRef.current = hls;
 
         hls.loadSource(streamUrl);
@@ -100,7 +117,7 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({ channel, onClose }) => {
                 switch (data.type) {
                     case window.Hls.ErrorTypes.NETWORK_ERROR:
                         console.warn("HLS Network Error - Retrying...");
-                        hls.startLoad(); // Aggressively retry
+                        hls.startLoad(); 
                         break;
                     case window.Hls.ErrorTypes.MEDIA_ERROR:
                         console.warn("HLS Media Error - Recovering...");
@@ -193,7 +210,7 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({ channel, onClose }) => {
                         {error}
                         <br/>
                         <span className="text-sm text-gray-500 mt-2 block">
-                           The upstream server may be down or the file format is not supported by your browser.
+                           The connection to the provider was lost.
                         </span>
                     </p>
                     <button 
