@@ -8,20 +8,20 @@ interface VideoPlayerProps {
 
 const VideoPlayer: React.FC<VideoPlayerProps> = ({ channel, onClose }) => {
   const videoRef = useRef<HTMLVideoElement>(null);
-  const hlsRef = useRef<any>(null); // Store HLS instance in ref to survive renders
+  const hlsRef = useRef<any>(null);
   const [error, setError] = useState<string | null>(null);
   const [useProxy, setUseProxy] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
+  const [retryCount, setRetryCount] = useState(0);
 
-  // Auto-detect Mixed Content (HTTPS site loading HTTP stream)
+  // Reset state on channel change
   useEffect(() => {
-    if (window.location.protocol === 'https:' && channel.url.startsWith('http:') && !channel.url.includes('corsproxy')) {
-        console.log("Mixed Content detected: Auto-enabling proxy");
-        setUseProxy(true);
-    } else {
-        // Reset proxy state when channel changes (unless it was auto-set above)
-        setUseProxy(false);
-    }
+    // Auto-detect Mixed Content immediately
+    const needsProxy = window.location.protocol === 'https:' && channel.url.startsWith('http:') && !channel.url.includes('corsproxy');
+    setUseProxy(needsProxy);
+    setRetryCount(0);
+    setError(null);
+    setIsLoading(true);
   }, [channel]);
 
   useEffect(() => {
@@ -36,17 +36,20 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({ channel, onClose }) => {
         ? `https://corsproxy.io/?${encodeURIComponent(channel.url)}` 
         : channel.url;
 
+    // Detect if source is HLS (m3u8)
     const isM3U8 = /\.m3u8(\?.*)?$/i.test(finalUrl) || (useProxy && channel.url.includes('.m3u8'));
 
-    console.log(`[Player] Loading: ${channel.name} | Proxy: ${useProxy} | Type: ${isM3U8 ? 'HLS' : 'Native'}`);
+    console.log(`[Player] Loading: ${channel.name}`);
+    console.log(`[Player] Url: ${finalUrl}`);
+    console.log(`[Player] Mode: ${isM3U8 ? 'HLS' : 'Native'} | Proxy: ${useProxy}`);
 
-    // 2. Cleanup previous HLS instance immediately
+    // 2. Cleanup previous HLS
     if (hlsRef.current) {
         hlsRef.current.destroy();
         hlsRef.current = null;
     }
 
-    // 3. HLS Playback Logic
+    // 3. HLS Logic
     if (isM3U8 && window.Hls && window.Hls.isSupported()) {
         const hls = new window.Hls({
             enableWorker: true,
@@ -62,22 +65,29 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({ channel, onClose }) => {
 
         hls.on(window.Hls.Events.MANIFEST_PARSED, () => {
             setIsLoading(false);
-            video.play().catch(e => console.warn("Autoplay blocked:", e));
+            const playPromise = video.play();
+            if (playPromise !== undefined) {
+                playPromise.catch(e => console.warn("Autoplay blocked:", e));
+            }
         });
 
         hls.on(window.Hls.Events.ERROR, (_event: any, data: any) => {
             if (data.fatal) {
+                console.warn("[HLS Error]", data);
                 switch (data.type) {
                     case window.Hls.ErrorTypes.NETWORK_ERROR:
-                        console.warn("Network error, trying to recover...");
+                        // If network error (CORS or 404), and not using proxy, try proxy.
+                        if (!useProxy) {
+                            console.log("HLS Network Error -> Switching to Proxy");
+                            setUseProxy(true);
+                            return; // Trigger re-render
+                        }
                         hls.startLoad();
                         break;
                     case window.Hls.ErrorTypes.MEDIA_ERROR:
-                        console.warn("Media error, trying to recover...");
                         hls.recoverMediaError();
                         break;
                     default:
-                        console.error("Fatal HLS error:", data);
                         hls.destroy();
                         setError("Stream is offline or format is unsupported.");
                         break;
@@ -86,7 +96,7 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({ channel, onClose }) => {
         });
 
     } else {
-        // 4. Native Playback (MP4, MKV, or Safari HLS)
+        // 4. Native Playback
         video.src = finalUrl;
         video.load();
         
@@ -94,40 +104,45 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({ channel, onClose }) => {
         if (playPromise !== undefined) {
             playPromise
                 .then(() => setIsLoading(false))
-                .catch(e => {
-                    console.warn("Native playback failed:", e);
-                    // Don't set error yet, wait for 'error' event
-                });
+                .catch(e => console.warn("Native playback start failed:", e));
         }
     }
 
-    // 5. Native Error Listener
+    // 5. Native Error Handlers
     const handleNativeError = () => {
         if (video.error) {
+            console.error("[Native Error]", video.error);
             setIsLoading(false);
-            const code = video.error.code;
-            let msg = "Unknown playback error.";
             
-            if (code === 3) msg = "Decoding error. Format might be unsupported.";
-            if (code === 4) msg = "Source unsupported or stream offline.";
-            
-            // If we aren't using proxy yet, suggest it
-            if (!useProxy && window.location.protocol === 'https:' && channel.url.startsWith('http:')) {
-                setUseProxy(true); // Force retry with proxy
+            // If error and not proxy, try proxy first
+            if (!useProxy) {
+                console.log("Native Error -> Switching to Proxy");
+                setUseProxy(true);
                 return;
             }
 
+            const code = video.error.code;
+            let msg = "Unknown playback error.";
+            if (code === 3) msg = "Decoding error. Format might be unsupported.";
+            if (code === 4) msg = "Source unsupported or stream offline.";
             setError(msg);
         }
     };
     
-    // 6. Native Loaded Data Listener (to clear loading state)
     const handleLoadedData = () => {
         setIsLoading(false);
     };
 
+    const handleStalled = () => {
+        // If stuck loading for too long
+        if (isLoading) {
+             console.log("Stalled...");
+        }
+    };
+
     video.addEventListener('error', handleNativeError);
     video.addEventListener('loadeddata', handleLoadedData);
+    video.addEventListener('stalled', handleStalled);
 
     return () => {
         if (hlsRef.current) {
@@ -137,28 +152,39 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({ channel, onClose }) => {
         if (video) {
             video.removeEventListener('error', handleNativeError);
             video.removeEventListener('loadeddata', handleLoadedData);
+            video.removeEventListener('stalled', handleStalled);
             video.removeAttribute('src');
             video.load();
         }
     };
-  }, [channel, useProxy]);
+  }, [channel, useProxy, retryCount]);
 
   return (
     <div className="fixed inset-0 z-50 bg-black flex flex-col justify-center items-center">
       {/* Header Overlay */}
-      <div className="absolute top-0 left-0 right-0 p-4 bg-gradient-to-b from-black/90 to-transparent z-20 flex justify-between items-center transition-opacity hover:opacity-100 opacity-0 md:opacity-100">
-        <div className="max-w-[70%]">
+      <div className="absolute top-0 left-0 right-0 p-4 bg-gradient-to-b from-black/90 to-transparent z-20 flex justify-between items-center">
+        <div className="max-w-[60%]">
             <h2 className="text-xl font-bold text-white truncate">{channel.name}</h2>
             <p className="text-gray-300 text-sm truncate">
-                {channel.group} • {useProxy ? 'Proxy Mode' : 'Direct Mode'}
+                {channel.group}
             </p>
         </div>
-        <button 
-            onClick={onClose}
-            className="text-white bg-red-600 hover:bg-red-700 px-6 py-2 rounded font-bold shadow-lg"
-        >
-            Close
-        </button>
+        
+        <div className="flex gap-3">
+            <button 
+                onClick={() => setUseProxy(!useProxy)}
+                className={`px-3 py-1 rounded text-xs font-bold border ${useProxy ? 'bg-green-600 border-green-500 text-white' : 'bg-gray-800 border-gray-600 text-gray-400'}`}
+                title="Toggle Proxy Mode to bypass CORS/HTTPS restrictions"
+            >
+                {useProxy ? 'Proxy ON' : 'Proxy OFF'}
+            </button>
+            <button 
+                onClick={onClose}
+                className="text-white bg-red-600 hover:bg-red-700 px-6 py-2 rounded font-bold shadow-lg"
+            >
+                Close
+            </button>
+        </div>
       </div>
 
       <div className="w-full h-full flex items-center justify-center bg-black relative">
@@ -182,7 +208,7 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({ channel, onClose }) => {
                             onClick={() => setUseProxy(true)}
                             className="bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 px-6 rounded transition"
                         >
-                            Try Proxy Mode (Fixes HTTP/HTTPS)
+                            Enable Proxy Mode
                         </button>
                     )}
                     
