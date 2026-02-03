@@ -10,15 +10,18 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({ channel, onClose }) => {
   const videoRef = useRef<HTMLVideoElement>(null);
   const hlsRef = useRef<any>(null); // Store HLS instance
   
-  // State
-  const [useProxy, setUseProxy] = useState(false);
+  // Mixed Content Detection: If we are on HTTPS and the stream is HTTP, we MUST use proxy immediately.
+  const isMixedContent = typeof window !== 'undefined' && 
+                         window.location.protocol === 'https:' && 
+                         channel.url.startsWith('http:');
+
+  const [useProxy, setUseProxy] = useState(isMixedContent);
   const [error, setError] = useState<string | null>(null);
   const [status, setStatus] = useState<'initializing' | 'playing' | 'buffering' | 'error'>('initializing');
   const [debugMsg, setDebugMsg] = useState('Initializing...');
 
   useEffect(() => {
-    // Reset state on channel change
-    setUseProxy(false);
+    setUseProxy(isMixedContent);
     setError(null);
     setStatus('initializing');
     setDebugMsg('Loading stream...');
@@ -29,24 +32,21 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({ channel, onClose }) => {
     const video = videoRef.current;
     if (!video) return;
 
-    // 1. Cleanup previous instances
     if (hlsRef.current) {
         hlsRef.current.destroy();
         hlsRef.current = null;
     }
 
-    // 2. Prepare URL
-    // If proxy is enabled, route through our local backend
     const streamUrl = useProxy 
         ? `/api/proxy?url=${encodeURIComponent(channel.url)}` 
         : channel.url;
     
-    console.log(`[Player] Loading: ${streamUrl} (Proxy: ${useProxy})`);
-    setDebugMsg(`Connecting to ${useProxy ? 'secure relay' : 'source'}...`);
+    console.log(`[Player] Loading: ${streamUrl} (Proxy: ${useProxy}, MixedContent: ${isMixedContent})`);
+    
+    if (useProxy) {
+        setDebugMsg('Securing stream...');
+    }
 
-    // 3. Determine Format
-    // We assume .m3u8 is HLS. Live streams from Xtream are almost always .m3u8.
-    // If content type is 'live' and no extension, assume HLS.
     const isM3U8 = streamUrl.toLowerCase().includes('.m3u8') || 
                    (channel.contentType === 'live' && !streamUrl.toLowerCase().match(/\.(mp4|mkv|avi|mov)$/));
 
@@ -58,27 +58,25 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({ channel, onClose }) => {
     const handleFailure = (msg: string, fatal: boolean = false) => {
         console.warn(`[Player Error] ${msg}`);
         
-        // If we haven't tried proxy yet, try it automatically
+        // If we failed and haven't tried proxy yet, try it.
         if (!useProxy && !streamUrl.includes('/api/proxy')) {
-            console.log("Attempting auto-switch to proxy...");
+            console.log("Switching to Secure Proxy...");
             setUseProxy(true);
             return;
         }
 
-        // If we are already using proxy or it's a fatal decode error
+        // If we are already using proxy, then it's a real dead end.
         setStatus('error');
         setError(msg);
     };
 
-    // 4. Playback Implementation
     if (isM3U8 && window.Hls && window.Hls.isSupported()) {
-        // --- HLS.js Path (Chrome, Firefox, Edge) ---
         const hls = new window.Hls({
             enableWorker: true,
             lowLatencyMode: true,
-            manifestLoadingTimeOut: 15000,
-            levelLoadingTimeOut: 15000,
-            fragLoadingTimeOut: 15000,
+            manifestLoadingTimeOut: 20000,
+            levelLoadingTimeOut: 20000,
+            fragLoadingTimeOut: 20000,
         });
         hlsRef.current = hls;
 
@@ -95,12 +93,11 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({ channel, onClose }) => {
                 switch (data.type) {
                     case window.Hls.ErrorTypes.NETWORK_ERROR:
                         console.warn("HLS Network Error");
-                        // 403/Cors -> Fail immediately to trigger proxy
                         if (data.response?.code === 403 || data.response?.code === 0) {
-                             handleFailure("Network blocked (CORS/403). Switching method...");
                              hls.destroy();
+                             handleFailure("Network blocked. Retrying secure connection...");
                         } else {
-                             hls.startLoad(); // Try to recover
+                             hls.startLoad();
                         }
                         break;
                     case window.Hls.ErrorTypes.MEDIA_ERROR:
@@ -109,34 +106,30 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({ channel, onClose }) => {
                         break;
                     default:
                         hls.destroy();
-                        handleFailure("Stream format not supported by browser.");
+                        handleFailure("Stream format not supported.");
                         break;
                 }
             }
         });
 
     } else if (video.canPlayType('application/vnd.apple.mpegurl') && isM3U8) {
-        // --- Native HLS Path (Safari) ---
+        // Safari Native HLS
         video.src = streamUrl;
         video.play().catch(() => {});
-        // Errors handled by native listener below
-
     } else {
-        // --- Standard Native Path (MP4, etc) ---
+        // Native MP4
         video.src = streamUrl;
         video.load();
         video.play().catch(() => {});
     }
 
-    // Native Error Listener (Catch-all)
     const onVideoError = () => {
         const err = video.error;
         let msg = "Playback failed.";
         if (err) {
-            if (err.code === 3) msg = "Browser cannot decode this video format.";
-            if (err.code === 4) msg = "Source unreachable or blocked.";
+            if (err.code === 3) msg = "Browser cannot decode this format.";
+            if (err.code === 4) msg = "Source unreachable.";
         }
-        // Only report if we aren't already recovering via HLS
         if (status !== 'error') {
             handleFailure(msg);
         }
@@ -165,27 +158,16 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({ channel, onClose }) => {
             <h2 className="text-xl font-bold text-white truncate drop-shadow-md">{channel.name}</h2>
             <div className="flex items-center gap-2 mt-1">
                 <span className="text-gray-300 text-xs px-2 py-1 bg-white/10 rounded">{channel.group}</span>
-                {useProxy && <span className="text-blue-300 text-xs px-2 py-1 bg-blue-900/50 rounded border border-blue-800">Secure Mode</span>}
-                <span className="text-gray-400 text-xs">{channel.contentType.toUpperCase()}</span>
+                {useProxy && <span className="text-blue-300 text-xs px-2 py-1 bg-blue-900/50 rounded border border-blue-800">SECURE RELAY</span>}
             </div>
         </div>
         
-        <div className="flex flex-col gap-2 items-end">
-            <button 
-                onClick={onClose}
-                className="bg-red-600 hover:bg-red-700 text-white px-6 py-2 rounded font-bold shadow-lg transition"
-            >
-                Close
-            </button>
-            {status === 'error' && !useProxy && (
-                <button 
-                    onClick={() => setUseProxy(true)}
-                    className="text-xs text-gray-300 underline hover:text-white"
-                >
-                    Try Secure Mode
-                </button>
-            )}
-        </div>
+        <button 
+            onClick={onClose}
+            className="bg-red-600 hover:bg-red-700 text-white px-6 py-2 rounded font-bold shadow-lg transition"
+        >
+            Close
+        </button>
       </div>
 
       {/* Main Video Area */}
@@ -203,23 +185,20 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({ channel, onClose }) => {
         {status === 'error' && error && (
             <div className="absolute inset-0 z-30 flex items-center justify-center bg-black/90 p-6">
                 <div className="bg-[#181818] p-8 rounded-xl border border-gray-700 max-w-lg w-full text-center shadow-2xl">
-                    <h3 className="text-2xl font-bold text-red-500 mb-2">Playback Error</h3>
-                    <p className="text-gray-300 mb-6">{error}</p>
-                    
-                    <div className="space-y-3">
-                         <a 
-                            href={`vlc://${channel.url}`}
-                            className="block w-full bg-orange-600 hover:bg-orange-700 text-white font-bold py-3 rounded transition flex items-center justify-center gap-2"
-                        >
-                             <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
-                                <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM9.555 7.168A1 1 0 008 8v4a1 1 0 001.555.832l3-2a1 1 0 000-1.664l-3-2z" clipRule="evenodd" />
-                            </svg>
-                            Open in VLC Player
-                        </a>
-                        <p className="text-xs text-gray-500">
-                            Recommended for MKV/AVI files or unstable streams.
-                        </p>
-                    </div>
+                    <h3 className="text-2xl font-bold text-red-500 mb-2">Stream Offline</h3>
+                    <p className="text-gray-300 mb-6">
+                        {error}
+                        <br/>
+                        <span className="text-sm text-gray-500 mt-2 block">
+                            We tried to connect via a secure relay but the source server is not responding.
+                        </span>
+                    </p>
+                    <button 
+                        onClick={() => { setStatus('initializing'); setUseProxy(true); }}
+                        className="bg-white text-black font-bold py-2 px-6 rounded hover:bg-gray-200 transition"
+                    >
+                        Retry Connection
+                    </button>
                 </div>
             </div>
         )}

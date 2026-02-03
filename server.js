@@ -38,7 +38,7 @@ app.use((req, res, next) => {
     next();
 });
 
-// Gzip responses (downloading), but we handle upload manually
+// Gzip responses
 app.use(compression());
 // Increase JSON limit
 app.use(express.json({ limit: '50mb' }));
@@ -72,7 +72,7 @@ app.get('/api/health', (req, res) => {
     }
 });
 
-// API: Stream Proxy (Bypasses CORS/Mixed Content)
+// API: Smart Stream Proxy (Bypasses CORS/Mixed Content & Rewrites HLS)
 app.get('/api/proxy', async (req, res) => {
     const { url } = req.query;
     if (!url || typeof url !== 'string') return res.status(400).send('Url required');
@@ -88,8 +88,9 @@ app.get('/api/proxy', async (req, res) => {
 
         const response = await fetch(url, { headers });
 
-        // Forward status
-        res.status(response.status);
+        if (!response.ok) {
+            return res.status(response.status).send(`Upstream Error: ${response.statusText}`);
+        }
 
         // Forward important headers
         const forwardHeaders = ['content-type', 'content-length', 'accept-ranges', 'content-range', 'access-control-allow-origin'];
@@ -98,10 +99,45 @@ app.get('/api/proxy', async (req, res) => {
             if (val) res.setHeader(h, val);
         });
 
-        // Handle Body
-        if (!response.body) return res.end();
+        const contentType = response.headers.get('content-type') || '';
+        
+        // --- SMART HLS REWRITE ---
+        // If it's an M3U8 playlist, we must rewrite internal URLs to use the proxy
+        // otherwise the browser will try to fetch http:// segments directly and fail (Mixed Content).
+        if (contentType.includes('mpegurl') || contentType.includes('m3u8') || url.endsWith('.m3u8')) {
+            let text = await response.text();
+            
+            // Determine base URL for resolving relative paths
+            // If url is http://site.com/folder/list.m3u8, base is http://site.com/folder/
+            const baseUrl = url.substring(0, url.lastIndexOf('/') + 1);
+            const myHost = req.get('host');
+            const protocol = req.protocol;
 
-        // Convert Web Stream to Node Stream and pipe
+            // Rewrite every line that is a URL (does not start with #)
+            text = text.replace(/^(?!#)(?!\s)(.+)$/gm, (match) => {
+                let target = match.trim();
+                
+                // Resolve relative URLs to absolute
+                try {
+                    if (!target.startsWith('http')) {
+                        target = new URL(target, baseUrl).toString();
+                    }
+                } catch (e) {
+                    // Fallback if URL resolution fails, use original logic or keep as is
+                }
+
+                // Wrap in proxy
+                return `${protocol}://${myHost}/api/proxy?url=${encodeURIComponent(target)}`;
+            });
+
+            res.send(text);
+            return;
+        }
+
+        // --- DIRECT STREAMING ---
+        // For TS chunks, MP4s, etc., just pipe the binary data
+        if (!response.body) return res.end();
+        
         // @ts-ignore
         Readable.fromWeb(response.body).pipe(res);
         
@@ -120,77 +156,54 @@ app.post('/api/upload-chunk', express.raw({ type: 'application/octet-stream', li
         const chunkIndex = parseInt(index);
         const totalChunks = parseInt(total);
         
-        // Save chunk as a separate file
         const chunkFileName = `upload_${id}_part_${chunkIndex}`;
         const chunkFilePath = path.join(DATA_DIR, chunkFileName);
         
-        // Write the chunk synchronously to ensure it exists before we move on
         fs.writeFileSync(chunkFilePath, req.body);
         
-        // If this is the last chunk, perform the merge
         if (chunkIndex === totalChunks - 1) {
-            console.log(`[Server] Received final chunk for ${id} (${totalChunks} parts). Starting merge...`);
+            console.log(`[Server] Received final chunk for ${id}. Merging...`);
             
-            // 1. Verify all parts exist BEFORE starting merge
             for (let i = 0; i < totalChunks; i++) {
-                const partPath = path.join(DATA_DIR, `upload_${id}_part_${i}`);
-                if (!fs.existsSync(partPath)) {
-                    console.error(`[Server] Merge failed. Missing part ${i}`);
+                if (!fs.existsSync(path.join(DATA_DIR, `upload_${id}_part_${i}`))) {
                     return res.status(400).json({ error: `Missing part ${i}` });
                 }
             }
 
-            // 2. Merge parts using appendFileSync for absolute safety (prevents race conditions)
             const tempCompleteFile = path.join(DATA_DIR, `upload_${id}_complete.tmp`);
-            
-            // Clear temp file if exists from previous failed attempt
             if (fs.existsSync(tempCompleteFile)) fs.unlinkSync(tempCompleteFile);
 
             try {
                 for (let i = 0; i < totalChunks; i++) {
-                    const partPath = path.join(DATA_DIR, `upload_${id}_part_${i}`);
-                    const data = fs.readFileSync(partPath);
+                    const data = fs.readFileSync(path.join(DATA_DIR, `upload_${id}_part_${i}`));
                     fs.appendFileSync(tempCompleteFile, data);
-                    // CRITICAL: Do NOT delete parts yet. If merge fails later, we need them for retry.
                 }
             } catch (mergeErr) {
-                console.error("[Server] Merge IO Error:", mergeErr);
-                return res.status(500).json({ error: "Server file merge failed." });
+                return res.status(500).json({ error: "Merge failed." });
             }
 
-            // 3. Rename to playlist.json (Atomic operation)
-            console.log(`[Server] Renaming ${id} to playlist.json...`);
             try {
-                // Remove existing file. Use rmSync to handle if it's accidentally a directory (EISDIR fix).
                 if (fs.existsSync(DATA_FILE)) {
                     fs.rmSync(DATA_FILE, { recursive: true, force: true });
                 }
                 fs.renameSync(tempCompleteFile, DATA_FILE);
             } catch (renameErr) {
-                console.error("[Server] Rename Error:", renameErr);
-                // If rename fails, we still have parts. Client can retry.
-                return res.status(500).json({ error: "Could not save final playlist file: " + renameErr.message });
+                return res.status(500).json({ error: "Save failed: " + renameErr.message });
             }
 
-            // 4. Cleanup parts ONLY after successful rename
-            console.log(`[Server] Cleanup parts for ${id}...`);
             try {
                 for (let i = 0; i < totalChunks; i++) {
-                    const partPath = path.join(DATA_DIR, `upload_${id}_part_${i}`);
-                    if (fs.existsSync(partPath)) fs.unlinkSync(partPath);
+                    fs.unlinkSync(path.join(DATA_DIR, `upload_${id}_part_${i}`));
                 }
-            } catch (cleanupErr) {
-                console.warn("[Server] Cleanup warning (non-fatal):", cleanupErr.message);
-            }
+            } catch (e) {}
 
-            console.log(`[Server] Upload ${id} complete.`);
             return res.json({ success: true, complete: true });
         }
 
         res.json({ success: true, chunk: chunkIndex });
     } catch (err) {
         console.error("[Server] Upload error:", err);
-        res.status(500).json({ error: "Failed to process chunk: " + err.message });
+        res.status(500).json({ error: err.message });
     }
 });
 
@@ -211,5 +224,4 @@ app.get('*', (req, res) => {
 
 app.listen(PORT, '0.0.0.0', () => {
     console.log(`StreamFlix Server running on port ${PORT}`);
-    console.log(`Data Directory: ${DATA_DIR}`);
 });
