@@ -25,8 +25,16 @@ const ensureDataDir = () => {
 };
 ensureDataDir();
 
-// Gzip responses
-app.use(compression());
+// CRITICAL FIX: Gzip messes up Video Streaming (Content-Length/Ranges). 
+// Disable it for the proxy endpoint or video content types.
+app.use(compression({
+    filter: (req, res) => {
+        if (req.path.startsWith('/api/proxy')) return false;
+        if (req.headers['x-no-compression']) return false;
+        return compression.filter(req, res);
+    }
+}));
+
 // Increase JSON limit
 app.use(express.json({ limit: '50mb' }));
 
