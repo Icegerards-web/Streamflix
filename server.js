@@ -3,6 +3,7 @@ import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
 import compression from 'compression';
+import { Readable } from 'stream';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -31,7 +32,7 @@ const ensureDataDir = () => {
 ensureDataDir();
 
 app.use((req, res, next) => {
-    if (req.url.startsWith('/api')) {
+    if (req.url.startsWith('/api') && !req.url.startsWith('/api/proxy')) {
         console.log(`[API Request] ${req.method} ${req.url}`);
     }
     next();
@@ -39,12 +40,13 @@ app.use((req, res, next) => {
 
 // Gzip responses (downloading), but we handle upload manually
 app.use(compression());
-app.use(express.json({ limit: '10mb' }));
+// Increase JSON limit
+app.use(express.json({ limit: '50mb' }));
 
 // CORS
 app.use((req, res, next) => {
     res.header("Access-Control-Allow-Origin", "*");
-    res.header("Access-Control-Allow-Headers", "Origin, X-Requested-With, Content-Type, Accept");
+    res.header("Access-Control-Allow-Headers", "Origin, X-Requested-With, Content-Type, Accept, Range");
     res.header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
     if (req.method === 'OPTIONS') return res.sendStatus(200);
     next();
@@ -70,8 +72,46 @@ app.get('/api/health', (req, res) => {
     }
 });
 
+// API: Stream Proxy (Bypasses CORS/Mixed Content)
+app.get('/api/proxy', async (req, res) => {
+    const { url } = req.query;
+    if (!url || typeof url !== 'string') return res.status(400).send('Url required');
+
+    try {
+        // Forward Range header for video seeking
+        const headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+        };
+        if (req.headers.range) {
+            headers['Range'] = req.headers.range;
+        }
+
+        const response = await fetch(url, { headers });
+
+        // Forward status
+        res.status(response.status);
+
+        // Forward important headers
+        const forwardHeaders = ['content-type', 'content-length', 'accept-ranges', 'content-range', 'access-control-allow-origin'];
+        forwardHeaders.forEach(h => {
+            const val = response.headers.get(h);
+            if (val) res.setHeader(h, val);
+        });
+
+        // Handle Body
+        if (!response.body) return res.end();
+
+        // Convert Web Stream to Node Stream and pipe
+        // @ts-ignore
+        Readable.fromWeb(response.body).pipe(res);
+        
+    } catch (e) {
+        console.error(`[Proxy Error] ${url}:`, e.message);
+        if (!res.headersSent) res.status(500).send('Proxy Request Failed');
+    }
+});
+
 // API: Robust Chunked Upload
-// We accept raw body to prevent JSON parsing overhead on chunks
 app.post('/api/upload-chunk', express.raw({ type: 'application/octet-stream', limit: '50mb' }), async (req, res) => {
     try {
         const { id, index, total } = req.query;

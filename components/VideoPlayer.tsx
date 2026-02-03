@@ -6,13 +6,30 @@ interface VideoPlayerProps {
   onClose: () => void;
 }
 
+// Proxy Rotation List
+// 1. Local Backend (Most reliable for Mixed Content & CORS)
+// 2. Corsproxy.io (Fast, Public)
+// 3. Codetabs (Fallback)
+const getProxyUrl = (index: number, url: string) => {
+    const encoded = encodeURIComponent(url);
+    switch (index % 3) {
+        case 0: return `/api/proxy?url=${encoded}`;
+        case 1: return `https://corsproxy.io/?${encoded}`;
+        case 2: return `https://api.codetabs.com/v1/proxy?quest=${encoded}`;
+        default: return url;
+    }
+};
+
 const VideoPlayer: React.FC<VideoPlayerProps> = ({ channel, onClose }) => {
   const videoRef = useRef<HTMLVideoElement>(null);
   const hlsRef = useRef<any>(null);
   
   const [error, setError] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(true);
+  
+  // Logic States
   const [useProxy, setUseProxy] = useState(false);
+  const [proxyIndex, setProxyIndex] = useState(0);
   const [currentUrl, setCurrentUrl] = useState<string>('');
   
   // 1. Initialize & Normalize URL
@@ -21,13 +38,8 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({ channel, onClose }) => {
     setError(null);
     setIsLoading(true);
     setUseProxy(false);
+    setProxyIndex(0);
     
-    // Auto-detect Mixed Content (HTTPS site -> HTTP stream)
-    const isMixed = window.location.protocol === 'https:' && channel.url.startsWith('http:') && !channel.url.includes('corsproxy');
-    if (isMixed) {
-        setUseProxy(true);
-    }
-
     // Normalization: Xtream Codes VOD (.mkv/.avi) -> .m3u8
     let urlToUse = channel.url;
     const xcRegex = /^(https?:\/\/[^/]+)\/(movie|series)\/([^/]+)\/([^/]+)\/(\d+)\.(.+)$/i;
@@ -40,6 +52,14 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({ channel, onClose }) => {
         }
     }
     setCurrentUrl(urlToUse);
+    
+    // Auto-detect Mixed Content (HTTPS site -> HTTP stream)
+    const isMixed = window.location.protocol === 'https:' && urlToUse.startsWith('http:') && !urlToUse.includes('corsproxy');
+    if (isMixed) {
+        setUseProxy(true);
+        // Start with Local Proxy (Index 0) as it handles Mixed Content best
+        setProxyIndex(0);
+    }
 
   }, [channel]);
 
@@ -50,11 +70,12 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({ channel, onClose }) => {
     const video = videoRef.current;
     if (!video) return;
 
+    // Construct Final URL
     const finalUrl = useProxy 
-        ? `https://corsproxy.io/?${encodeURIComponent(currentUrl)}`
+        ? getProxyUrl(proxyIndex, currentUrl)
         : currentUrl;
 
-    console.log(`[Player] Loading: ${finalUrl}`);
+    console.log(`[Player] Loading: ${finalUrl} (Proxy: ${useProxy} Idx: ${proxyIndex})`);
     
     // Cleanup previous HLS
     if (hlsRef.current) {
@@ -62,14 +83,17 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({ channel, onClose }) => {
         hlsRef.current = null;
     }
 
-    const isM3U8 = finalUrl.includes('.m3u8') || useProxy; // Proxy usually returns text/stream which hls.js might handle if it's m3u8 content
+    // Determine Mode
+    // If we use local proxy, we might get an m3u8 stream but the extension is hidden in query.
+    // We assume HLS if original url was m3u8 or if we are proxying (hls.js can detect mime type usually, but better to force it if we know)
+    const isM3U8 = currentUrl.includes('.m3u8');
 
     if (isM3U8 && window.Hls && window.Hls.isSupported()) {
         const hls = new window.Hls({
             enableWorker: true,
             lowLatencyMode: true,
             backBufferLength: 90,
-            maxMaxBufferLength: 30, // Limit buffer to avoid memory issues
+            maxMaxBufferLength: 30,
             xhrSetup: (xhr: any) => { xhr.withCredentials = false; }
         });
         
@@ -87,22 +111,17 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({ channel, onClose }) => {
             if (data.fatal) {
                 console.warn("[HLS Error]", data);
                 if (data.type === window.Hls.ErrorTypes.NETWORK_ERROR) {
-                    if (!useProxy) {
-                        console.log("Network Error -> Trying Proxy");
-                        setUseProxy(true);
-                        return;
-                    }
-                    hls.startLoad();
+                   handlePlaybackError();
                 } else if (data.type === window.Hls.ErrorTypes.MEDIA_ERROR) {
                     hls.recoverMediaError();
                 } else {
                     hls.destroy();
-                    setError("Stream error. Source might be offline.");
+                    handlePlaybackError();
                 }
             }
         });
     } else {
-        // Native Playback (MP4 usually)
+        // Native Playback
         video.src = finalUrl;
         video.load();
         
@@ -113,13 +132,7 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({ channel, onClose }) => {
     const handleNativeError = () => {
         if (video.error) {
             console.error("Native Error:", video.error);
-            setIsLoading(false);
-            if (!useProxy) {
-                 console.log("Native Error -> Trying Proxy");
-                 setUseProxy(true);
-            } else {
-                 setError("Playback failed. Stream format unsupported or offline.");
-            }
+            handlePlaybackError();
         }
     };
     
@@ -142,7 +155,39 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({ channel, onClose }) => {
             video.load();
         }
     };
-  }, [currentUrl, useProxy]);
+  }, [currentUrl, useProxy, proxyIndex]);
+
+  // Robust Error Handler / Retry Logic
+  const handlePlaybackError = () => {
+      setIsLoading(true);
+      
+      if (!useProxy) {
+          // If not using proxy, try proxy (Index 0 = Local)
+          console.log("Error -> Switching to Proxy Mode (Local)");
+          setUseProxy(true);
+          setProxyIndex(0);
+      } else {
+          // If already using proxy, try next proxy
+          if (proxyIndex < 2) {
+              console.log(`Error -> Rotating Proxy to Index ${proxyIndex + 1}`);
+              setProxyIndex(prev => prev + 1);
+          } else {
+              // All proxies failed
+              setIsLoading(false);
+              setError("Stream unavailable via all connection methods.");
+          }
+      }
+  };
+
+  const getCurrentProxyName = () => {
+      if (!useProxy) return 'Direct';
+      switch (proxyIndex % 3) {
+          case 0: return 'Local Relay (Best)';
+          case 1: return 'CorsProxy.io';
+          case 2: return 'CodeTabs';
+          default: return 'Unknown';
+      }
+  };
 
   return (
     <div className="fixed inset-0 z-50 bg-black flex flex-col justify-center items-center">
@@ -150,12 +195,18 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({ channel, onClose }) => {
       <div className="absolute top-0 left-0 right-0 p-4 bg-gradient-to-b from-black/90 to-transparent z-20 flex justify-between items-center">
         <div className="max-w-[60%]">
             <h2 className="text-xl font-bold text-white truncate drop-shadow-md">{channel.name}</h2>
-            <p className="text-gray-300 text-sm truncate opacity-80">{channel.group}</p>
+            <div className="flex items-center gap-2">
+                <p className="text-gray-300 text-sm truncate opacity-80">{channel.group}</p>
+                {useProxy && <span className="text-[10px] bg-blue-900 text-blue-200 px-1 rounded border border-blue-700">{getCurrentProxyName()}</span>}
+            </div>
         </div>
         
         <div className="flex gap-3">
             <button 
-                onClick={() => setUseProxy(!useProxy)}
+                onClick={() => {
+                    setUseProxy(!useProxy);
+                    setProxyIndex(0);
+                }}
                 className={`px-3 py-1 rounded text-xs font-bold border transition ${
                     useProxy ? 'bg-green-600 border-green-500 text-white' : 'bg-white/10 border-white/20 text-gray-300 hover:bg-white/20'
                 }`}
@@ -176,7 +227,9 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({ channel, onClose }) => {
         {isLoading && !error && (
             <div className="absolute inset-0 flex flex-col items-center justify-center z-10 pointer-events-none">
                 <div className="w-16 h-16 border-4 border-red-600 border-t-transparent rounded-full animate-spin mb-4"></div>
-                <p className="text-white font-medium animate-pulse">Buffering...</p>
+                <p className="text-white font-medium animate-pulse">
+                    {useProxy ? `Connecting via ${getCurrentProxyName()}...` : 'Buffering...'}
+                </p>
             </div>
         )}
 
@@ -187,13 +240,13 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({ channel, onClose }) => {
                 <p className="text-gray-300 mb-6 text-lg">{error}</p>
                 
                 <div className="flex flex-col gap-3">
-                    <button 
-                        onClick={() => { setError(null); setIsLoading(true); setUseProxy(!useProxy); }}
-                        className="bg-white text-black font-bold py-3 px-6 rounded hover:bg-gray-200 transition"
+                     <button 
+                        onClick={() => { setError(null); handlePlaybackError(); }}
+                        className="bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 px-6 rounded transition"
                     >
-                        Try {useProxy ? 'Direct Connection' : 'Proxy Mode'}
+                        Try Next Connection Method
                     </button>
-                    
+
                     <a 
                         href={`vlc://${channel.url}`}
                         className="bg-orange-600 hover:bg-orange-700 text-white font-bold py-3 px-6 rounded flex items-center justify-center gap-2 transition"
