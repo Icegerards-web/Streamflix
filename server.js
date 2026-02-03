@@ -79,7 +79,8 @@ app.get('/api/proxy', async (req, res) => {
 
         const controller = new AbortController();
         
-        // Cleanup Optimization: If client disconnects, kill upstream immediately
+        // Cleanup: If client disconnects, we abort the upstream fetch.
+        // We attach this listener immediately.
         req.on('close', () => {
              controller.abort();
         });
@@ -128,48 +129,59 @@ app.get('/api/proxy', async (req, res) => {
                        lowerUrl.includes('.m3u8');
 
         if (isM3U8) {
-            const buffer = await response.arrayBuffer();
-            const text = new TextDecoder().decode(buffer);
+            // Text based processing for M3U8
+            // We buffer the playlist (it's small) to rewrite it
+            try {
+                const buffer = await response.arrayBuffer();
+                const text = new TextDecoder().decode(buffer);
 
-            // Verify it's actually a playlist
-            if (text.trim().startsWith('#EXTM3U')) {
-                const baseUrl = response.url.substring(0, response.url.lastIndexOf('/') + 1);
+                if (text.trim().startsWith('#EXTM3U')) {
+                    const baseUrl = response.url.substring(0, response.url.lastIndexOf('/') + 1);
 
-                // Rewrite logic to force proxy for child segments (Recursive Proxy)
-                const rewritten = text.replace(/^(?!#)(?!\s)(.+)$/gm, (match) => {
-                    let target = match.trim();
-                    try {
-                        if (!target.startsWith('http')) {
-                            target = new URL(target, baseUrl).toString();
-                        }
-                    } catch (e) { /* ignore invalid urls */ }
-                    
-                    return `/api/proxy?url=${encodeURIComponent(target)}`;
-                });
+                    const rewritten = text.replace(/^(?!#)(?!\s)(.+)$/gm, (match) => {
+                        let target = match.trim();
+                        try {
+                            if (!target.startsWith('http')) {
+                                target = new URL(target, baseUrl).toString();
+                            }
+                        } catch (e) { /* ignore invalid urls */ }
+                        return `/api/proxy?url=${encodeURIComponent(target)}`;
+                    });
 
-                res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
-                res.send(rewritten);
-                return;
-            } else {
-                // False alarm: Server sent binary data but labeled it m3u8.
-                res.setHeader('Content-Type', 'video/mp2t'); 
-                // Fallthrough to binary pipe...
-                // @ts-ignore
-                Readable.fromWeb(new ReadableStream({
-                    start(controller) {
-                        controller.enqueue(new Uint8Array(buffer));
-                        controller.close();
-                    }
-                })).pipe(res);
-                return;
+                    res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
+                    res.send(rewritten);
+                    return;
+                } else {
+                    // Not text? Send raw.
+                    res.setHeader('Content-Type', 'video/mp2t'); 
+                    res.write(new Uint8Array(buffer));
+                    res.end();
+                    return;
+                }
+            } catch (err) {
+                 // Buffer failed (maybe too large or aborted)
+                 if (!res.headersSent) res.status(500).send("Playlist Error");
+                 return;
             }
         }
 
         // --- BINARY STREAM (TS, MP4, MKV) ---
         if (!response.body) return res.end();
         
-        // @ts-ignore
-        Readable.fromWeb(response.body).pipe(res);
+        // Robust piping
+        const stream = Readable.fromWeb(response.body);
+        
+        // Handle stream errors (like AbortError from controller.abort()) to prevent crash
+        stream.on('error', (err) => {
+            // AbortError is expected when client closes connection
+            if (err.name !== 'AbortError') {
+                console.error(`[Proxy Stream Error] ${url}:`, err.message);
+            }
+            if (!res.writableEnded) res.end();
+        });
+
+        // Pipe to response
+        stream.pipe(res);
 
     } catch (e) {
         if (e.name !== 'AbortError') {

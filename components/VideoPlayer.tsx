@@ -13,10 +13,7 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({ channel, onClose }) => {
   const isHttps = typeof window !== 'undefined' && window.location.protocol === 'https:';
   const isHttpStream = channel.url.startsWith('http:');
   
-  // OPTIMIZATION:
-  // Only force proxy if strictly required by browser security (Mixed Content).
-  // Previously we forced proxy for all Live streams, which overloaded the server.
-  // Now we try direct play first. If CORS/Network fails, we auto-switch to proxy.
+  // Mixed content check: strict Https playing Http requires proxy
   const isMixedContent = isHttps && isHttpStream;
   const [useProxy, setUseProxy] = useState(isMixedContent);
   
@@ -79,19 +76,26 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({ channel, onClose }) => {
         setError(msg);
     };
 
+    const attemptPlay = () => {
+        if (!video) return;
+        const playPromise = video.play();
+        if (playPromise !== undefined) {
+            playPromise.catch(error => {
+                // AbortError is benign (happens if play interrupted by pause/load/unmount)
+                if (error.name === 'AbortError') return;
+                console.log("Auto-play prevented:", error);
+            });
+        }
+    };
+
     if (isM3U8 && window.Hls && window.Hls.isSupported()) {
-        
-        // CONFIGURATION: Optimized for faster load times
         const hlsConfig = {
             enableWorker: true,
-            // Fetch loader tweaks for faster initial connection
             manifestLoadingTimeOut: 20000, 
             manifestLoadingMaxRetry: 2,
             levelLoadingTimeOut: 20000,
             fragLoadingTimeOut: 20000,
-            
-            // Buffer tweaks
-            startLevel: -1, // Auto start quality
+            startLevel: -1,
         };
 
         const hls = new window.Hls(hlsConfig);
@@ -102,14 +106,13 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({ channel, onClose }) => {
 
         hls.on(window.Hls.Events.MANIFEST_PARSED, () => {
             setDebugMsg('Buffering...');
-            video.play().catch(e => console.log("Autoplay blocked:", e));
+            attemptPlay();
         });
 
         hls.on(window.Hls.Events.ERROR, (_: any, data: any) => {
             if (data.fatal) {
                 switch (data.type) {
                     case window.Hls.ErrorTypes.NETWORK_ERROR:
-                        // Immediate switch on network error during manifest load
                         if (data.details === 'manifestLoadError' && !useProxy) {
                              handleFailure("Network access denied");
                              return;
@@ -132,16 +135,12 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({ channel, onClose }) => {
     } else if (video.canPlayType('application/vnd.apple.mpegurl') && isM3U8) {
         // Safari Native HLS
         video.src = streamUrl;
-        video.play().catch(() => {});
-        
-        // Safari doesn't give detailed error types easily, but 'error' event will catch it
+        attemptPlay();
     } else {
         // Native MP4/MKV
         video.src = streamUrl;
         video.load();
-        video.play().catch((e) => {
-             console.error("Native play error:", e);
-        });
+        attemptPlay();
     }
 
     const onVideoError = () => {
@@ -168,6 +167,9 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({ channel, onClose }) => {
         video.removeEventListener('error', onVideoError);
         video.removeEventListener('waiting', onWaiting);
         video.removeEventListener('playing', onPlaying);
+        // Clean source to stop downloading
+        video.removeAttribute('src'); 
+        video.load();
     };
   }, [channel, useProxy, retryCount]);
 
