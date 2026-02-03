@@ -35,7 +35,8 @@ const App: React.FC = () => {
   // --- PERSISTENCE & AUTO-CONFIG ---
   useEffect(() => {
       // Load history on mount
-      setHistory(getHistory());
+      const localHistory = getHistory();
+      setHistory(localHistory);
 
       const initLoad = async () => {
           setLoading(true);
@@ -49,7 +50,7 @@ const App: React.FC = () => {
                   setCategories(recategorized);
                   setAllChannels(cached.allChannels);
                   pickFeatured(cached.allChannels);
-                  generateRecommendations(cached.allChannels);
+                  // Recommendations triggered by useEffect below
                   setIsSetupComplete(true);
                   
                   checkStaticFileExists().then(exists => {
@@ -119,7 +120,6 @@ const App: React.FC = () => {
     setCategories(cats);
     setAllChannels(channels);
     pickFeatured(channels);
-    generateRecommendations(channels);
     setIsSetupComplete(true);
     await saveToDB(cats, channels);
   };
@@ -136,11 +136,6 @@ const App: React.FC = () => {
                else setFeatured(updated[Math.floor(Math.random() * updated.length)]);
           }
 
-          // Initial recommendations
-          if (recommendations.length === 0 && updated.length > 50) {
-             generateRecommendations(updated);
-          }
-
           if (updated.length % 500 === 0 || newChannels.length > 100) {
               saveToDB(newCats, updated); 
           }
@@ -150,7 +145,66 @@ const App: React.FC = () => {
 
       setIsSetupComplete(true);
       setLoading(false); 
-  }, [featured, recommendations]);
+  }, [featured]);
+
+  // --- INTELLIGENT RECOMMENDATIONS ---
+  useEffect(() => {
+    if (allChannels.length === 0) return;
+
+    // 1. Filter: Only Movies and Series
+    const vodContent = allChannels.filter(c => c.contentType === 'movie' || c.contentType === 'series');
+    if (vodContent.length === 0) return;
+
+    let recs: Channel[] = [];
+    const existingIds = new Set<string>();
+
+    // 2. History-Based Logic
+    if (history.length > 0) {
+        // Collect groups from recently watched movies/series
+        const relevantHistory = history.filter(h => h.contentType === 'movie' || h.contentType === 'series');
+        const recentGroups = new Set(relevantHistory.slice(0, 10).map(h => h.group));
+        const historyIds = new Set(history.map(h => h.id));
+
+        // Find similar content
+        const similar = vodContent.filter(c => 
+            c.group && recentGroups.has(c.group) && !historyIds.has(c.id)
+        );
+
+        // Shuffle similar content
+        for (let i = similar.length - 1; i > 0; i--) {
+            const j = Math.floor(Math.random() * (i + 1));
+            [similar[i], similar[j]] = [similar[j], similar[i]];
+        }
+
+        // Add up to 15 similar items
+        for (const item of similar) {
+            if (recs.length >= 15) break;
+            recs.push(item);
+            existingIds.add(item.id);
+        }
+    }
+
+    // 3. Fill with Random Popular (if needed)
+    if (recs.length < 20) {
+        // Shuffle all VOD
+        const pool = [...vodContent];
+        for (let i = pool.length - 1; i > 0; i--) {
+            const j = Math.floor(Math.random() * (i + 1));
+            [pool[i], pool[j]] = [pool[j], pool[i]];
+        }
+        
+        for (const c of pool) {
+            if (recs.length >= 20) break;
+            if (!existingIds.has(c.id)) {
+                recs.push(c);
+                existingIds.add(c.id);
+            }
+        }
+    }
+
+    setRecommendations(recs);
+
+  }, [allChannels, history]); // Re-run when library or history changes
 
   const pickFeatured = (channels: Channel[]) => {
     const movies = channels.filter(c => c.contentType === 'movie');
@@ -159,23 +213,6 @@ const App: React.FC = () => {
         const random = featuredPool[Math.floor(Math.random() * featuredPool.length)];
         setFeatured(random);
     }
-  };
-
-  const generateRecommendations = (channels: Channel[]) => {
-      if (!channels || channels.length === 0) return;
-      // Simple logic: Pick 15 random items
-      const recs: Channel[] = [];
-      const usedIndices = new Set<number>();
-      const attempts = Math.min(channels.length, 15);
-      
-      while(recs.length < attempts) {
-          const idx = Math.floor(Math.random() * channels.length);
-          if (!usedIndices.has(idx)) {
-              usedIndices.add(idx);
-              recs.push(channels[idx]);
-          }
-      }
-      setRecommendations(recs);
   };
 
   const handlePlayChannel = (channel: Channel) => {
@@ -387,42 +424,54 @@ const App: React.FC = () => {
       };
   }, [allChannels]);
 
+  // --- SEARCH & FILTER LOGIC ---
   const filteredCategories = useMemo(() => {
-    // Basic Filtering based on View
-    const targetType = currentView === 'live' ? 'live' : (currentView === 'series' ? 'series' : 'movie');
     const result: Category[] = [];
-    const query = searchQuery.toLowerCase().trim();
     
-    const matches = (str: string) => str.toLowerCase().includes(query);
+    // Improved Search: Multi-term matching
+    const searchTerms = searchQuery.toLowerCase().split(/\s+/).filter(t => t.length > 0);
+    const matchesSearch = (c: Channel) => {
+        if (searchTerms.length === 0) return true;
+        const text = (c.name + ' ' + (c.group || '')).toLowerCase();
+        return searchTerms.every(term => text.includes(term));
+    };
 
     // If viewing 'home', we show a mix or specific logic
     if (currentView === 'home' && !searchQuery) {
-        // Add History
-        if (history.length > 0) {
-            result.push({ name: 'Recently Watched', channels: history, language: 'All' });
+        // Add History (Only Movies/Series)
+        const vodHistory = history.filter(h => h.contentType === 'movie' || h.contentType === 'series');
+        if (vodHistory.length > 0) {
+            result.push({ name: 'Recently Watched', channels: vodHistory, language: 'All' });
         }
-        // Add Recommendations
+        
+        // Add Recommendations (Only Movies/Series - already filtered by useEffect)
         if (recommendations.length > 0) {
             result.push({ name: 'Recommended for You', channels: recommendations, language: 'All' });
         }
     }
 
     // Filter main categories
+    const targetType = currentView === 'live' ? 'live' : (currentView === 'series' ? 'series' : 'movie');
+
     for (const cat of categories) {
-        // If View is 'home', we allow all types but prioritize categorization. 
-        // If View is specific, we filter by type.
         let channelsInCat = cat.channels;
         
-        if (currentView !== 'home') {
-            channelsInCat = channelsInCat.filter(c => c.contentType === targetType);
+        // VIEW FILTER
+        if (currentView === 'home') {
+             // Home only shows Movies & Series
+             channelsInCat = channelsInCat.filter(c => c.contentType === 'movie' || c.contentType === 'series');
+        } else {
+             // Specific tabs show their specific content
+             channelsInCat = channelsInCat.filter(c => c.contentType === targetType);
         }
         
-        if (query) {
-             channelsInCat = channelsInCat.filter(c => matches(c.name) || matches(c.group || ''));
+        // SEARCH FILTER
+        if (searchQuery) {
+             channelsInCat = channelsInCat.filter(c => matchesSearch(c));
         }
         
         if (channelsInCat.length > 0) {
-            if (query || currentLanguage === 'All' || cat.language === currentLanguage) {
+            if (searchQuery || currentLanguage === 'All' || cat.language === currentLanguage) {
                 result.push({ ...cat, channels: channelsInCat });
             }
         }
