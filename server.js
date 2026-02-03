@@ -178,9 +178,11 @@ app.get('/api/proxy', async (req, res) => {
         // --- BINARY STREAM (TS, MP4, MKV) ---
         if (!response.body) return res.end();
         
-        // Robust piping with increased highWaterMark for better throughput
-        // We use Readable.fromWeb but set the buffer size on the resulting Node stream if possible.
-        const stream = Readable.fromWeb(response.body, { highWaterMark: 64 * 1024 }); 
+        // CRITICAL PERFORMANCE: 
+        // Use a huge High Water Mark (10MB) to pull data from upstream aggressively.
+        // This effectively moves buffering from the client's browser to the server's RAM,
+        // preventing stuttering if the provider is slightly unstable.
+        const stream = Readable.fromWeb(response.body, { highWaterMark: 10 * 1024 * 1024 }); 
         
         // Cleanup: If client disconnects, we abort upstream.
         req.on('close', () => {
@@ -194,7 +196,6 @@ app.get('/api/proxy', async (req, res) => {
         stream.on('error', (err) => {
             if (err.name !== 'AbortError') {
                // Silent fail on stream errors is preferred for proxy media to avoid crashing server
-               // console.error(`[Proxy Stream Error] ${url}:`, err.message);
             }
         });
 

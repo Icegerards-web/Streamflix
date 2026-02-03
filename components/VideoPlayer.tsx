@@ -93,14 +93,15 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({ channel, onClose }) => {
         const hlsConfig = {
             enableWorker: true,
             manifestLoadingTimeOut: 20000, 
-            manifestLoadingMaxRetry: 2,
+            manifestLoadingMaxRetry: 3,
             levelLoadingTimeOut: 20000,
             fragLoadingTimeOut: 20000,
             startLevel: -1,
-            // Bandwidth Optimization: Reduce buffer size to prevent wasteful downloading
-            maxBufferLength: 10, 
-            maxMaxBufferLength: 20,
-            backBufferLength: 10
+            // Optimized Buffering for High Latency Streams
+            // Increase buffer size to 60 seconds to smooth out connection dips
+            maxBufferLength: 60, 
+            maxMaxBufferLength: 120,
+            backBufferLength: 30
         };
 
         const hls = new window.Hls(hlsConfig);
