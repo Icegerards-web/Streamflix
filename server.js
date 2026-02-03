@@ -58,82 +58,79 @@ app.get('/api/health', (req, res) => {
     }
 });
 
-// --- ADVANCED PROXY ---
-// Fixes Mixed Content, Masquerades as VLC, and Handles HLS Rewriting
+// --- SMART STREAM PROXY ---
 app.get('/api/proxy', async (req, res) => {
     const { url } = req.query;
     if (!url || typeof url !== 'string') return res.status(400).send('Url required');
 
     try {
-        // 1. Masquerade as VLC to prevent blocking/throttling by IPTV providers
+        // Use a standard Browser User-Agent to look like legitimate web traffic
         const headers = {
-            'User-Agent': 'VLC/3.0.18 LibVLC/3.0.18',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
             'Accept': '*/*',
             'Connection': 'keep-alive'
         };
         
-        // Forward Range header for seeking
+        // Critical: Forward Range headers exactly as received
+        // This allows the browser to request specific byte chunks (seeking, loading large files)
         if (req.headers.range) {
             headers['Range'] = req.headers.range;
         }
 
         const controller = new AbortController();
-        // 30s timeout for initial connection
-        const timeout = setTimeout(() => controller.abort(), 30000);
+        const timeout = setTimeout(() => controller.abort(), 60000); // 60s timeout for slow streams
 
         const response = await fetch(url, { 
             headers, 
             signal: controller.signal,
-            redirect: 'follow' // Follow redirects to get the final URL for relative path resolution
+            redirect: 'follow' 
         });
         
         clearTimeout(timeout);
 
         if (!response.ok) {
+            // Forward 416 Range Not Satisfiable correctly
+            if (response.status === 416) {
+                 return res.sendStatus(416);
+            }
             return res.status(response.status).send(`Upstream Error: ${response.statusText}`);
         }
 
-        // 2. Header Sanitization
-        // We do NOT forward Content-Encoding or Content-Length blindly. 
-        // Node's pipe handles chunked encoding automatically. 
-        // Forwarding them often causes ERR_HTTP2_PROTOCOL_ERROR or broken downloads.
-        const safeHeaders = ['content-type', 'accept-ranges', 'last-modified', 'etag'];
+        // Forward vital headers
+        const safeHeaders = ['content-type', 'content-length', 'accept-ranges', 'content-range', 'last-modified', 'etag'];
         safeHeaders.forEach(h => {
             const val = response.headers.get(h);
             if (val) res.setHeader(h, val);
         });
 
-        // 3. Content Sniffing & HLS Rewrite
+        // Content Type Detection
         const contentType = response.headers.get('content-type') || '';
+        const lowerUrl = url.toLowerCase();
+        
+        // Robust M3U8 Detection
+        // Checks content-type OR file extension in URL (handling query params)
         const isM3U8 = contentType.includes('mpegurl') || 
                        contentType.includes('m3u8') || 
-                       url.endsWith('.m3u8');
+                       lowerUrl.includes('.m3u8');
 
-        // Check buffer for #EXTM3U to be sure it's a playlist, not a TS stream labeled incorrectly
         if (isM3U8) {
             const buffer = await response.arrayBuffer();
             const text = new TextDecoder().decode(buffer);
 
-            // Double check: Does it look like a playlist?
+            // Verify it's actually a playlist
             if (text.trim().startsWith('#EXTM3U')) {
-                // Resolution Base: Use response.url (final URL after redirects)
                 const baseUrl = response.url.substring(0, response.url.lastIndexOf('/') + 1);
                 const myHost = req.get('host');
                 const protocol = req.protocol;
 
-                // Rewrite Logic:
-                // Find lines that are NOT comments (#) and are NOT empty.
+                // Rewrite logic: Fix all internal URLs to point to this proxy
                 const rewritten = text.replace(/^(?!#)(?!\s)(.+)$/gm, (match) => {
                     let target = match.trim();
-                    
-                    // Resolve relative URLs
                     try {
                         if (!target.startsWith('http')) {
                             target = new URL(target, baseUrl).toString();
                         }
-                    } catch (e) { /* keep original on error */ }
-
-                    // Recursive Proxy: Point back to this proxy
+                    } catch (e) { /* ignore */ }
                     return `${protocol}://${myHost}/api/proxy?url=${encodeURIComponent(target)}`;
                 });
 
@@ -141,8 +138,7 @@ app.get('/api/proxy', async (req, res) => {
                 res.send(rewritten);
                 return;
             } else {
-                // It was labeled m3u8 but isn't text? Send as binary.
-                res.setHeader('Content-Type', 'video/mp2t'); // Force TS content type
+                // False alarm, treat as binary (sometimes servers send .ts as .m3u8 mime type erroneously)
                 // @ts-ignore
                 Readable.fromWeb(new ReadableStream({
                     start(controller) {
@@ -154,7 +150,7 @@ app.get('/api/proxy', async (req, res) => {
             }
         }
 
-        // 4. Binary Stream (MP4, MKV, TS Chunks)
+        // Standard Pipe for MP4/MKV/TS
         if (!response.body) return res.end();
         
         // @ts-ignore
@@ -168,7 +164,7 @@ app.get('/api/proxy', async (req, res) => {
     }
 });
 
-// API: Robust Chunked Upload (Keep existing logic)
+// API: Upload Chunk (Keep existing)
 app.post('/api/upload-chunk', express.raw({ type: 'application/octet-stream', limit: '50mb' }), async (req, res) => {
     try {
         const { id, index, total } = req.query;
@@ -176,53 +172,33 @@ app.post('/api/upload-chunk', express.raw({ type: 'application/octet-stream', li
 
         const chunkIndex = parseInt(index);
         const totalChunks = parseInt(total);
-        
         const chunkFileName = `upload_${id}_part_${chunkIndex}`;
         const chunkFilePath = path.join(DATA_DIR, chunkFileName);
         
         fs.writeFileSync(chunkFilePath, req.body);
         
         if (chunkIndex === totalChunks - 1) {
-            
             for (let i = 0; i < totalChunks; i++) {
                 if (!fs.existsSync(path.join(DATA_DIR, `upload_${id}_part_${i}`))) {
                     return res.status(400).json({ error: `Missing part ${i}` });
                 }
             }
-
             const tempCompleteFile = path.join(DATA_DIR, `upload_${id}_complete.tmp`);
             if (fs.existsSync(tempCompleteFile)) fs.unlinkSync(tempCompleteFile);
 
-            try {
-                for (let i = 0; i < totalChunks; i++) {
-                    const data = fs.readFileSync(path.join(DATA_DIR, `upload_${id}_part_${i}`));
-                    fs.appendFileSync(tempCompleteFile, data);
-                }
-            } catch (mergeErr) {
-                return res.status(500).json({ error: "Merge failed." });
+            for (let i = 0; i < totalChunks; i++) {
+                const data = fs.readFileSync(path.join(DATA_DIR, `upload_${id}_part_${i}`));
+                fs.appendFileSync(tempCompleteFile, data);
+                fs.unlinkSync(path.join(DATA_DIR, `upload_${id}_part_${i}`));
             }
 
-            try {
-                if (fs.existsSync(DATA_FILE)) {
-                    fs.rmSync(DATA_FILE, { recursive: true, force: true });
-                }
-                fs.renameSync(tempCompleteFile, DATA_FILE);
-            } catch (renameErr) {
-                return res.status(500).json({ error: "Save failed: " + renameErr.message });
-            }
-
-            try {
-                for (let i = 0; i < totalChunks; i++) {
-                    fs.unlinkSync(path.join(DATA_DIR, `upload_${id}_part_${i}`));
-                }
-            } catch (e) {}
+            if (fs.existsSync(DATA_FILE)) fs.rmSync(DATA_FILE, { recursive: true, force: true });
+            fs.renameSync(tempCompleteFile, DATA_FILE);
 
             return res.json({ success: true, complete: true });
         }
-
         res.json({ success: true, chunk: chunkIndex });
     } catch (err) {
-        console.error("[Server] Upload error:", err);
         res.status(500).json({ error: err.message });
     }
 });
