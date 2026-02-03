@@ -14,8 +14,8 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({ channel, onClose }) => {
   const isHttpStream = channel.url.startsWith('http:');
   const isLive = channel.contentType === 'live' || channel.url.includes('.m3u8');
   
-  // Rule: HTTPS App + HTTP Stream = Proxy Required (Mixed Content)
-  // Also proxy Live streams generally to fix CORS issues.
+  // Always proxy HTTP streams on HTTPS to prevent Mixed Content.
+  // Always proxy Live streams to fix CORS and stability issues.
   const mustProxy = (isHttps && isHttpStream) || isLive;
   const [useProxy, setUseProxy] = useState(mustProxy);
   
@@ -76,25 +76,32 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({ channel, onClose }) => {
 
     if (isM3U8 && window.Hls && window.Hls.isSupported()) {
         
-        // CONFIGURATION: Different settings for Live vs Movies (VOD)
+        // CONFIGURATION: Tuned for Stability
         const hlsConfig = isLive 
         ? {
-            // LIVE SETTINGS (Stability over Buffer)
+            // LIVE SETTINGS
             enableWorker: true,
-            lowLatencyMode: false,
+            lowLatencyMode: false, // Vital for stability
+            
+            // Start fragments further back to avoid hitting the "live edge" (where segments might not exist yet)
+            liveSyncDurationCount: 5, 
+            liveMaxLatencyDurationCount: 10,
+            
+            // Healthy buffers
             backBufferLength: 30,
-            maxBufferLength: 10, // Small buffer for live to prevent stalling
-            liveSyncDurationCount: 3, // Stay 3 segments behind live edge
-            manifestLoadingTimeOut: 20000,
-            levelLoadingTimeOut: 20000,
-            fragLoadingTimeOut: 20000,
+            maxBufferLength: 30, 
+            
+            // Generous Timeouts
+            manifestLoadingTimeOut: 30000,
+            levelLoadingTimeOut: 30000,
+            fragLoadingTimeOut: 30000,
         } 
         : {
-            // VOD SETTINGS (Max Buffer for Smoothness)
+            // VOD SETTINGS
             enableWorker: true,
             lowLatencyMode: false,
             backBufferLength: 90,
-            maxBufferLength: 60, // 60s buffer for movies
+            maxBufferLength: 60,
             maxMaxBufferLength: 600,
             manifestLoadingTimeOut: 30000,
             levelLoadingTimeOut: 30000,
@@ -210,7 +217,7 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({ channel, onClose }) => {
                         {error}
                         <br/>
                         <span className="text-sm text-gray-500 mt-2 block">
-                           The connection to the provider was lost.
+                           The connection to the provider was lost or timed out.
                         </span>
                     </p>
                     <button 

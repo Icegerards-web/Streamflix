@@ -95,9 +95,10 @@ app.get('/api/proxy', async (req, res) => {
         }
 
         // --- HEADER SANITIZATION ---
-        // CRITICAL: Do NOT forward Content-Length or Content-Encoding blindly.
-        // Node's response object handles chunking and compression automatically.
-        // Forwarding mismatched headers causes ERR_HTTP2_PROTOCOL_ERROR and 502s.
+        // CRITICAL: Do NOT forward Content-Length or Content-Encoding.
+        // Fetch decompresses responses automatically, so the upstream Content-Length 
+        // refers to the compressed size, while we are sending decompressed bytes.
+        // This mismatch causes ERR_HTTP2_PROTOCOL_ERROR and 502s.
         const safeHeaders = [
             'content-type', 
             'accept-ranges', 
@@ -126,11 +127,11 @@ app.get('/api/proxy', async (req, res) => {
             // Verify it's actually a playlist
             if (text.trim().startsWith('#EXTM3U')) {
                 const baseUrl = response.url.substring(0, response.url.lastIndexOf('/') + 1);
-                const myHost = req.get('host');
-                const protocol = req.protocol;
 
                 // Rewrite logic: Fix all internal URLs to point to this proxy
-                // This regex captures lines that don't start with # and aren't whitespace
+                // CRITICAL FIX: Use root-relative paths (`/api/proxy?...`) instead of absolute URLs (`http://...`).
+                // This ensures the browser uses the current protocol (HTTPS) and domain automatically,
+                // fixing Mixed Content errors when the server is behind a proxy.
                 const rewritten = text.replace(/^(?!#)(?!\s)(.+)$/gm, (match) => {
                     let target = match.trim();
                     // If it's relative, make it absolute
@@ -140,13 +141,12 @@ app.get('/api/proxy', async (req, res) => {
                         }
                     } catch (e) { /* ignore invalid urls */ }
                     
-                    // Recursive Proxy
-                    return `${protocol}://${myHost}/api/proxy?url=${encodeURIComponent(target)}`;
+                    // Recursive Proxy (Relative Path)
+                    return `/api/proxy?url=${encodeURIComponent(target)}`;
                 });
 
                 // Set correct content type for HLS
                 res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
-                // We do NOT set Content-Length here; Express will calculate it or chunk it.
                 res.send(rewritten);
                 return;
             } else {
@@ -166,11 +166,6 @@ app.get('/api/proxy', async (req, res) => {
         }
 
         // --- BINARY STREAM (TS, MP4, MKV) ---
-        
-        // Only forward content-length for direct binary pipes where we don't touch the body
-        const len = response.headers.get('content-length');
-        if (len) res.setHeader('Content-Length', len);
-
         if (!response.body) return res.end();
         
         // @ts-ignore
