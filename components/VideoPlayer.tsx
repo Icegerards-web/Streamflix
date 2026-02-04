@@ -81,9 +81,15 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({ channel, onClose }) => {
         const hlsConfig = {
             enableWorker: true,
             manifestLoadingTimeOut: 20000, 
-            manifestLoadingMaxRetry: 3,
-            startLevel: 0, 
-            startFragPrefetch: true,
+            manifestLoadingMaxRetry: 2,
+            levelLoadingTimeOut: 15000,
+            // STARTUP OPTIMIZATION
+            startLevel: 0, // Start at lowest quality
+            autoStartLoad: true,
+            startFragPrefetch: true, // Fetch first segment while parsing manifest
+            // BUFFER OPTIMIZATION
+            maxBufferLength: 30,
+            maxMaxBufferLength: 60,
         };
 
         const hls = new window.Hls(hlsConfig);

@@ -5,6 +5,7 @@ import { fileURLToPath } from 'url';
 import compression from 'compression';
 import http from 'http';
 import https from 'https';
+import dns from 'dns';
 import { URL } from 'url';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -66,13 +67,37 @@ app.get('/api/health', (req, res) => {
     }
 });
 
+// --- PERFORMANCE OPTIMIZATION: DNS CACHE ---
+// Eliminates repeated DNS lookups for every video segment (saving 50-200ms per request)
+const dnsCache = new Map();
+const cachedLookup = (hostname, options, callback) => {
+    const key = hostname;
+    if (dnsCache.has(key)) {
+        const { address, family } = dnsCache.get(key);
+        return callback(null, address, family);
+    }
+    // Force IPv4 for speed and stability
+    dns.lookup(hostname, { family: 4 }, (err, address, family) => {
+        if (!err) dnsCache.set(key, { address, family });
+        callback(err, address, family);
+    });
+};
+
 // --- OPTIMIZED AGENTS ---
-// Keep connections alive to reduce handshake overhead (fixes "taking forever" on subsequent chunks)
-const httpAgent = new http.Agent({ keepAlive: true, timeout: 60000 });
-const httpsAgent = new https.Agent({ 
+// Keep connections alive to reduce handshake overhead
+const agentConfig = {
     keepAlive: true, 
-    timeout: 60000,
-    rejectUnauthorized: false // CRITICAL: Ignore self-signed/invalid upstream certs
+    keepAliveMsecs: 1000,
+    maxSockets: 100, // Allow high parallelism for segments
+    maxFreeSockets: 10,
+    timeout: 30000,
+    lookup: cachedLookup // Use our DNS cache
+};
+
+const httpAgent = new http.Agent(agentConfig);
+const httpsAgent = new https.Agent({ 
+    ...agentConfig,
+    rejectUnauthorized: false 
 });
 
 // --- SMART PROXY ---
@@ -94,7 +119,8 @@ app.get('/api/proxy', (req, res) => {
             const agent = isHttps ? httpsAgent : httpAgent;
             
             const headers = {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+                // Mimic a dedicated player to avoid some browser throttling logic on upstream
+                'User-Agent': 'IPTVSmartersPro/1.1.1 (iPad; iOS 14.4.2; Scale/2.00)',
                 'Accept': '*/*',
                 'Connection': 'keep-alive'
             };
@@ -107,17 +133,14 @@ app.get('/api/proxy', (req, res) => {
             const options = {
                 headers,
                 agent,
-                family: 4 // Force IPv4 to avoid slow IPv6 fallbacks on some networks
+                family: 4 // Force IPv4
             };
 
             const proxyReq = requestModule.get(currentUrl, options, (proxyRes) => {
                 // Follow Redirects
                 if ([301, 302, 303, 307, 308].includes(proxyRes.statusCode) && proxyRes.headers.location) {
-                    // Consume data to free memory before redirecting
                     proxyRes.resume(); 
-                    
                     let newLocation = proxyRes.headers.location;
-                    // Handle relative redirects
                     if (!newLocation.startsWith('http')) {
                         try { newLocation = new URL(newLocation, currentUrl).toString(); } catch(e){}
                     }
@@ -127,7 +150,6 @@ app.get('/api/proxy', (req, res) => {
                 // Prepare Response Headers
                 res.status(proxyRes.statusCode || 200);
 
-                // Forward relevant headers
                 const forwardHeaders = [
                     'content-type', 'content-length', 'content-range', 'accept-ranges', 
                     'last-modified', 'etag'
@@ -137,7 +159,6 @@ app.get('/api/proxy', (req, res) => {
                     if (proxyRes.headers[h]) res.setHeader(h, proxyRes.headers[h]);
                 });
 
-                // Force CORS & Cache settings
                 res.setHeader('Access-Control-Allow-Origin', '*');
                 res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
 
@@ -173,19 +194,22 @@ app.get('/api/proxy', (req, res) => {
                     });
                 } else {
                     // Binary Stream (MP4/MKV)
-                    // Pipe directly. Handle errors on stream to avoid server crashes.
                     proxyRes.pipe(res);
                 }
             });
 
+            // CRITICAL OPTIMIZATION: Disable Nagle's algorithm
+            // Forces packets to be sent immediately without buffering.
+            proxyReq.on('socket', (socket) => {
+                socket.setNoDelay(true);
+            });
+
             proxyReq.on('error', (err) => {
-                 // Common error if client disconnects early, don't log spam
                  if (err.code !== 'ECONNRESET' && !res.headersSent) {
                      res.status(502).send('Gateway Error');
                  }
             });
             
-            // Clean up upstream if downstream disconnects (User closes player)
             req.on('close', () => {
                 if (!proxyReq.destroyed) proxyReq.destroy();
             });
@@ -198,7 +222,7 @@ app.get('/api/proxy', (req, res) => {
     doRequest(url, 0);
 });
 
-// API: Upload Chunk (Keep existing)
+// API: Upload Chunk
 app.post('/api/upload-chunk', express.raw({ type: 'application/octet-stream', limit: '50mb' }), async (req, res) => {
     try {
         const { id, index, total } = req.query;
