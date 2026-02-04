@@ -239,7 +239,7 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({ channel, onClose }) => {
             className="w-full h-full object-contain"
             controls
             autoPlay
-            preload="auto"
+            preload="metadata"
             playsInline
             crossOrigin="anonymous"
         />

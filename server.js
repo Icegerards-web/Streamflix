@@ -3,7 +3,9 @@ import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
 import compression from 'compression';
-import { Readable } from 'stream';
+import http from 'http';
+import https from 'https';
+import { URL } from 'url';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -25,8 +27,7 @@ const ensureDataDir = () => {
 };
 ensureDataDir();
 
-// CRITICAL FIX: Gzip messes up Video Streaming (Content-Length/Ranges). 
-// Disable it for the proxy endpoint or video content types.
+// Disable compression for proxy to avoid buffering/content-length issues
 app.use(compression({
     filter: (req, res) => {
         if (req.path.startsWith('/api/proxy')) return false;
@@ -35,7 +36,6 @@ app.use(compression({
     }
 }));
 
-// Increase JSON limit
 app.use(express.json({ limit: '50mb' }));
 
 // CORS
@@ -66,157 +66,100 @@ app.get('/api/health', (req, res) => {
     }
 });
 
-// --- SMART STREAM PROXY ---
-app.get('/api/proxy', async (req, res) => {
+// --- NATIVE STREAM PROXY ---
+// Uses native http/https modules for lowest latency and proper Range support
+app.get('/api/proxy', (req, res) => {
     const { url } = req.query;
     if (!url || typeof url !== 'string') return res.status(400).send('Url required');
 
     try {
-        // Standard Browser User-Agent to avoid blocking
+        const targetUrl = new URL(url);
+        const isHttps = targetUrl.protocol === 'https:';
+        const client = isHttps ? https : http;
+
         const headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
             'Accept': '*/*',
-            'Connection': 'keep-alive',
-            'Cache-Control': 'no-cache'
+            'Connection': 'keep-alive'
         };
-        
-        // Forward Range headers for seeking in VODs (Critical for MKV/MP4 buffering)
+
+        // CRITICAL: Forward Range header. 
+        // This tells upstream we only want a specific chunk (e.g., bytes=0-1024).
+        // Without this, upstream sends the whole file, causing the "downloading forever" issue.
         if (req.headers.range) {
             headers['Range'] = req.headers.range;
         }
 
-        const controller = new AbortController();
-        
-        // 60s timeout for initial connection
-        const timeout = setTimeout(() => controller.abort(), 60000);
+        const proxyReq = client.get(url, { headers }, (proxyRes) => {
+            // Forward Status Code (200 or 206 Partial Content)
+            res.status(proxyRes.statusCode || 200);
 
-        const response = await fetch(url, { 
-            headers, 
-            signal: controller.signal,
-            redirect: 'follow' 
-        });
-        
-        clearTimeout(timeout);
+            // Forward Headers
+            Object.keys(proxyRes.headers).forEach(key => {
+                // Skip content-encoding to avoid double compression issues
+                if (key === 'content-encoding') return;
+                // Forward everything else (Content-Type, Content-Length, Content-Range, etc.)
+                res.setHeader(key, proxyRes.headers[key]);
+            });
 
-        if (!response.ok) {
-            if (response.status === 416) return res.sendStatus(416);
-            return res.status(response.status).send(`Upstream Error: ${response.statusText}`);
-        }
+            // Ensure no-cache for live streams
+            res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
 
-        // --- HEADER SANITIZATION ---
-        const safeHeaders = [
-            'content-type', 
-            'content-length', 
-            'accept-ranges', 
-            'content-range', 
-            'last-modified', 
-            'etag'
-        ];
-        
-        safeHeaders.forEach(h => {
-            const val = response.headers.get(h);
-            if (val) res.setHeader(h, val);
-        });
+            const contentType = proxyRes.headers['content-type'] || '';
+            const isM3U8 = contentType.includes('mpegurl') || contentType.includes('m3u8') || url.includes('.m3u8');
 
-        // Set status code (important for 206 Partial Content)
-        res.status(response.status);
-
-        // FORCE NO-CACHE
-        res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
-        res.setHeader('Pragma', 'no-cache');
-        res.setHeader('Expires', '0');
-
-        // Content Type Detection
-        let contentType = response.headers.get('content-type') || '';
-        const lowerUrl = url.toLowerCase();
-        
-        if (lowerUrl.includes('.mkv') && (contentType === 'application/octet-stream' || !contentType)) {
-            contentType = 'video/webm';
-            res.setHeader('Content-Type', 'video/webm');
-        }
-
-        const isM3U8 = contentType.includes('mpegurl') || 
-                       contentType.includes('m3u8') || 
-                       lowerUrl.includes('.m3u8');
-
-        if (isM3U8) {
-            // Text based processing for M3U8
-            try {
-                req.on('close', () => controller.abort());
-
-                const buffer = await response.arrayBuffer();
-                const text = new TextDecoder().decode(buffer);
-
-                if (text.trim().startsWith('#EXTM3U')) {
-                    const baseUrl = response.url.substring(0, response.url.lastIndexOf('/') + 1);
-                    const rewritten = text.replace(/^(?!#)(?!\s)(.+)$/gm, (match) => {
-                        let target = match.trim();
-                        try {
-                            if (!target.startsWith('http')) {
-                                target = new URL(target, baseUrl).toString();
-                            }
-                        } catch (e) { }
-                        return `/api/proxy?url=${encodeURIComponent(target)}`;
-                    });
-
-                    res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
-                    res.setHeader('Content-Length', Buffer.byteLength(rewritten));
-                    res.send(rewritten);
-                    return;
-                } else {
-                    res.setHeader('Content-Type', 'video/mp2t'); 
-                    res.write(new Uint8Array(buffer));
-                    res.end();
-                    return;
-                }
-            } catch (err) {
-                 if (!res.headersSent) res.status(500).send("Playlist Error");
-                 return;
-            }
-        }
-
-        // --- BINARY STREAM (TS, MP4, MKV) ---
-        if (!response.body) return res.end();
-        
-        // CRITICAL PERFORMANCE FIX:
-        // Removed the massive 10MB highWaterMark. Using default/smaller buffer ensures
-        // the server sends the first byte to the client IMMEDIATELY.
-        // This fixes the "ages to load" issue.
-        const stream = Readable.fromWeb(response.body); 
-        
-        // CLEANUP: If browser disconnects (e.g., closing video player), destroy upstream immediately.
-        req.on('close', () => {
-             controller.abort();
-             if (!stream.destroyed) {
-                 try { stream.destroy(); } catch (e) {}
-             }
-        });
-
-        res.on('close', () => {
-             controller.abort();
-             if (!stream.destroyed) try { stream.destroy(); } catch (e) {}
-        });
-
-        // Suppress errors during piping (e.g., client disconnects early = EPIPE/ECONNRESET)
-        const handleError = (err) => {
-            if (err.code === 'ECONNRESET' || err.code === 'EPIPE' || err.name === 'AbortError') {
-                // Expected when user stops playing
-                controller.abort();
+            if (isM3U8) {
+                 // --- M3U8 PROCESSING (BUFFERED) ---
+                 // M3U8 files are small text files. We must buffer them to rewrite the URLs inside.
+                 let data = [];
+                 proxyRes.on('data', chunk => data.push(chunk));
+                 proxyRes.on('end', () => {
+                     try {
+                         const buffer = Buffer.concat(data);
+                         const text = buffer.toString('utf8');
+                         
+                         if (text.trim().startsWith('#EXTM3U')) {
+                             const baseUrl = url.substring(0, url.lastIndexOf('/') + 1);
+                             const rewritten = text.replace(/^(?!#)(?!\s)(.+)$/gm, (match) => {
+                                let target = match.trim();
+                                if (!target.startsWith('http')) {
+                                    try { target = new URL(target, baseUrl).toString(); } catch(e){}
+                                }
+                                return `/api/proxy?url=${encodeURIComponent(target)}`;
+                             });
+                             
+                             // Update length because content changed
+                             res.setHeader('Content-Length', Buffer.byteLength(rewritten));
+                             res.send(rewritten);
+                         } else {
+                             // Fallback if not actually M3U8 text
+                             res.write(buffer);
+                             res.end();
+                         }
+                     } catch (e) {
+                         res.end();
+                     }
+                 });
             } else {
-                // console.error(`[Proxy Stream Error]`, err.message);
+                // --- BINARY STREAM (PIPED) ---
+                // For MP4, MKV, TS, etc. we pipe directly.
+                // This ensures backpressure is handled and bytes flow immediately.
+                proxyRes.pipe(res);
             }
-        };
+        });
 
-        stream.on('error', handleError);
-        res.on('error', handleError);
+        proxyReq.on('error', (e) => {
+            if (!res.headersSent) res.sendStatus(502);
+            // console.error("Proxy Error:", e.message);
+        });
 
-        stream.pipe(res);
+        // Cleanup: If browser cancels request (closes player), destroy upstream connection
+        req.on('close', () => {
+            proxyReq.destroy();
+        });
 
     } catch (e) {
-        if (e.name !== 'AbortError') {
-             // console.error(`[Proxy Error] ${url}:`, e.message);
-             if (!res.headersSent) res.status(500).send('Stream Unavailable');
-        }
+        if (!res.headersSent) res.status(400).send("Invalid URL");
     }
 });
 
