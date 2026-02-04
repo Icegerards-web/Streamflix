@@ -66,13 +66,21 @@ app.get('/api/health', (req, res) => {
     }
 });
 
-// --- SMART NATIVE PROXY ---
-// Handles Redirects Internally + Ignores SSL Errors + Pipes Streams
+// --- OPTIMIZED AGENTS ---
+// Keep connections alive to reduce handshake overhead (fixes "taking forever" on subsequent chunks)
+const httpAgent = new http.Agent({ keepAlive: true, timeout: 60000 });
+const httpsAgent = new https.Agent({ 
+    keepAlive: true, 
+    timeout: 60000,
+    rejectUnauthorized: false // CRITICAL: Ignore self-signed/invalid upstream certs
+});
+
+// --- SMART PROXY ---
 app.get('/api/proxy', (req, res) => {
     const { url } = req.query;
     if (!url || typeof url !== 'string') return res.status(400).send('Url required');
 
-    // Recursive function to handle redirects
+    // Handle redirects recursively
     const doRequest = (currentUrl, redirectCount) => {
         if (redirectCount > 5) {
              if (!res.headersSent) res.status(502).send('Too many redirects');
@@ -82,42 +90,54 @@ app.get('/api/proxy', (req, res) => {
         try {
             const target = new URL(currentUrl);
             const isHttps = target.protocol === 'https:';
-            const client = isHttps ? https : http;
+            const requestModule = isHttps ? https : http;
+            const agent = isHttps ? httpsAgent : httpAgent;
             
-            // Forward headers but remove host-specific ones
             const headers = {
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
                 'Accept': '*/*',
                 'Connection': 'keep-alive'
             };
-            if (req.headers.range) headers['Range'] = req.headers.range;
+
+            // Forward Range header (Critical for seeking/fast start)
+            if (req.headers.range) {
+                headers['Range'] = req.headers.range;
+            }
 
             const options = {
                 headers,
-                // CRITICAL: Ignore upstream SSL errors (self-signed, IP mismatch, etc)
-                rejectUnauthorized: false 
+                agent,
+                family: 4 // Force IPv4 to avoid slow IPv6 fallbacks on some networks
             };
-            if (isHttps) options.agent = new https.Agent({ rejectUnauthorized: false });
 
-            const proxyReq = client.get(currentUrl, options, (proxyRes) => {
-                // Follow Redirects Internally
+            const proxyReq = requestModule.get(currentUrl, options, (proxyRes) => {
+                // Follow Redirects
                 if ([301, 302, 303, 307, 308].includes(proxyRes.statusCode) && proxyRes.headers.location) {
-                    proxyRes.resume(); // discard body
-                    // Resolve relative URLs in Location header
-                    const newLocation = new URL(proxyRes.headers.location, currentUrl).toString();
+                    // Consume data to free memory before redirecting
+                    proxyRes.resume(); 
+                    
+                    let newLocation = proxyRes.headers.location;
+                    // Handle relative redirects
+                    if (!newLocation.startsWith('http')) {
+                        try { newLocation = new URL(newLocation, currentUrl).toString(); } catch(e){}
+                    }
                     return doRequest(newLocation, redirectCount + 1);
                 }
 
-                // Forward Status (200, 206, 404, etc)
+                // Prepare Response Headers
                 res.status(proxyRes.statusCode || 200);
 
-                // Forward Headers
-                Object.keys(proxyRes.headers).forEach(key => {
-                    if (['content-encoding', 'transfer-encoding', 'access-control-allow-origin'].includes(key)) return;
-                    res.setHeader(key, proxyRes.headers[key]);
-                });
+                // Forward relevant headers
+                const forwardHeaders = [
+                    'content-type', 'content-length', 'content-range', 'accept-ranges', 
+                    'last-modified', 'etag'
+                ];
                 
-                // Set CORS/Caching
+                forwardHeaders.forEach(h => {
+                    if (proxyRes.headers[h]) res.setHeader(h, proxyRes.headers[h]);
+                });
+
+                // Force CORS & Cache settings
                 res.setHeader('Access-Control-Allow-Origin', '*');
                 res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
 
@@ -125,46 +145,49 @@ app.get('/api/proxy', (req, res) => {
                 const isM3U8 = contentType.includes('mpegurl') || contentType.includes('m3u8') || currentUrl.includes('.m3u8');
 
                 if (isM3U8) {
-                    // Buffer and Rewrite for M3U8
+                    // M3U8 Rewriting
                     const chunks = [];
                     proxyRes.on('data', c => chunks.push(c));
                     proxyRes.on('end', () => {
-                        const buffer = Buffer.concat(chunks);
-                        const text = buffer.toString('utf8');
-                        
-                        // Check if valid M3U
-                        if (text.trim().startsWith('#EXTM3U')) {
-                             const baseUrl = currentUrl.substring(0, currentUrl.lastIndexOf('/') + 1);
-                             const rewritten = text.replace(/^(?!#)(?!\s)(.+)$/gm, (match) => {
-                                let line = match.trim();
-                                // Resolve relative URLs
-                                if (!line.startsWith('http')) {
-                                    try { line = new URL(line, baseUrl).toString(); } catch(e){}
-                                }
-                                // Wrap in proxy
-                                return `/api/proxy?url=${encodeURIComponent(line)}`;
-                             });
-                             res.setHeader('Content-Length', Buffer.byteLength(rewritten));
-                             res.send(rewritten);
-                        } else {
-                            // Not actually text, pass through
-                            res.write(buffer);
-                            res.end();
+                        try {
+                            const buffer = Buffer.concat(chunks);
+                            const text = buffer.toString('utf8');
+                            if (text.trim().startsWith('#EXTM3U')) {
+                                 const baseUrl = currentUrl.substring(0, currentUrl.lastIndexOf('/') + 1);
+                                 const rewritten = text.replace(/^(?!#)(?!\s)(.+)$/gm, (match) => {
+                                    let line = match.trim();
+                                    if (!line.startsWith('http')) {
+                                        try { line = new URL(line, baseUrl).toString(); } catch(e){}
+                                    }
+                                    return `/api/proxy?url=${encodeURIComponent(line)}`;
+                                 });
+                                 res.setHeader('Content-Length', Buffer.byteLength(rewritten));
+                                 res.send(rewritten);
+                            } else {
+                                res.write(buffer);
+                                res.end();
+                            }
+                        } catch (e) {
+                             if (!res.headersSent) res.end();
                         }
                     });
                 } else {
-                    // Pipe Binary (MP4, MKV, TS) directly
+                    // Binary Stream (MP4/MKV)
+                    // Pipe directly. Handle errors on stream to avoid server crashes.
                     proxyRes.pipe(res);
                 }
             });
 
             proxyReq.on('error', (err) => {
-                 if (!res.headersSent) res.status(502).send('Gateway Error');
+                 // Common error if client disconnects early, don't log spam
+                 if (err.code !== 'ECONNRESET' && !res.headersSent) {
+                     res.status(502).send('Gateway Error');
+                 }
             });
             
-            // Clean up if client disconnects
+            // Clean up upstream if downstream disconnects (User closes player)
             req.on('close', () => {
-                proxyReq.destroy();
+                if (!proxyReq.destroyed) proxyReq.destroy();
             });
 
         } catch (e) {

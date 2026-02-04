@@ -10,9 +10,7 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({ channel, onClose }) => {
   const videoRef = useRef<HTMLVideoElement>(null);
   const hlsRef = useRef<any>(null); // Store HLS instance
   
-  // Performance Fix: Default to PROXY enabled.
-  // Trying to direct connect to IPTV streams often results in CORS timeouts (5-10s delay).
-  // Starting with the proxy immediately makes it feel instant.
+  // Always use proxy for external streams to avoid CORS and Mixed Content issues
   const [useProxy, setUseProxy] = useState(true);
   
   const [error, setError] = useState<string | null>(null);
@@ -21,10 +19,8 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({ channel, onClose }) => {
   const [retryCount, setRetryCount] = useState(0);
 
   useEffect(() => {
-    // Check if it's a local demo file or direct blob, otherwise proxy
     const isBlob = channel.url.startsWith('blob:') || channel.url.includes('localhost');
     setUseProxy(!isBlob);
-    
     setError(null);
     setStatus('initializing');
     setDebugMsg('Loading stream...');
@@ -36,6 +32,7 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({ channel, onClose }) => {
     const video = videoRef.current;
     if (!video) return;
 
+    // Cleanup previous HLS
     if (hlsRef.current) {
         hlsRef.current.stopLoad();
         hlsRef.current.destroy();
@@ -46,12 +43,9 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({ channel, onClose }) => {
         ? `/api/proxy?url=${encodeURIComponent(channel.url)}` 
         : channel.url;
     
-    console.log(`[Player] Loading: ${streamUrl} (Proxy: ${useProxy})`);
-    
-    if (useProxy) setDebugMsg('Connecting...');
-    else setDebugMsg('Connecting to Source...');
+    console.log(`[Player] Loading: ${streamUrl}`);
+    setDebugMsg(retryCount > 0 ? `Retrying (${retryCount})...` : 'Connecting...');
 
-    // Detect if HLS
     const isM3U8 = streamUrl.toLowerCase().includes('.m3u8') || 
                    (channel.contentType === 'live' && !streamUrl.toLowerCase().match(/\.(mp4|mkv|avi|mov)$/));
 
@@ -62,16 +56,12 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({ channel, onClose }) => {
 
     const handleFailure = (msg: string) => {
         console.warn(`[Player Error] ${msg}`);
-        
-        // Fallback: If proxy failed (500), try direct? 
-        // Or if direct failed, try proxy.
-        if (!useProxy && !streamUrl.includes('/api/proxy')) {
-            console.log("Direct connection failed. Switching to Proxy...");
-            setUseProxy(true);
+        // Only retry automatically once.
+        if (retryCount < 1) {
+            console.log("Auto-retry...");
             setRetryCount(prev => prev + 1);
             return;
         }
-
         setStatus('error');
         setError(msg);
     };
@@ -81,7 +71,6 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({ channel, onClose }) => {
         const playPromise = video.play();
         if (playPromise !== undefined) {
             playPromise.catch(error => {
-                // AbortError is benign (happens if play interrupted by pause/load/unmount)
                 if (error.name === 'AbortError') return;
                 console.log("Auto-play prevented:", error);
             });
@@ -91,15 +80,10 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({ channel, onClose }) => {
     if (isM3U8 && window.Hls && window.Hls.isSupported()) {
         const hlsConfig = {
             enableWorker: true,
-            manifestLoadingTimeOut: 15000, 
-            manifestLoadingMaxRetry: 2,
-            // Low Latency / Fast Start
-            startLevel: 0, // Start with lowest quality for instant playback, then switch up
+            manifestLoadingTimeOut: 20000, 
+            manifestLoadingMaxRetry: 3,
+            startLevel: 0, 
             startFragPrefetch: true,
-            // Optimized Buffering
-            maxBufferLength: 60, 
-            maxMaxBufferLength: 120,
-            backBufferLength: 30
         };
 
         const hls = new window.Hls(hlsConfig);
@@ -147,12 +131,10 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({ channel, onClose }) => {
         const err = video.error;
         let msg = "Playback failed.";
         if (err) {
-            if (err.code === 3) msg = "Browser cannot play this video format.";
-            if (err.code === 4) msg = "Source unreachable.";
+            if (err.code === 3) msg = "Browser cannot decode this video.";
+            if (err.code === 4) msg = "Source unreachable or file not found.";
         }
-        if (status !== 'error') {
-            handleFailure(msg);
-        }
+        if (status !== 'error') handleFailure(msg);
     };
 
     const onWaiting = () => setStatus('buffering');
@@ -164,7 +146,7 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({ channel, onClose }) => {
 
     return () => {
         if (hlsRef.current) {
-            hlsRef.current.stopLoad(); // Immediately stop network activity
+            hlsRef.current.stopLoad(); 
             hlsRef.current.detachMedia();
             hlsRef.current.destroy();
             hlsRef.current = null;
@@ -173,7 +155,6 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({ channel, onClose }) => {
         video.removeEventListener('waiting', onWaiting);
         video.removeEventListener('playing', onPlaying);
         
-        // Clean source to stop downloading
         video.pause();
         video.removeAttribute('src'); 
         video.load();
@@ -206,7 +187,7 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({ channel, onClose }) => {
         {(status === 'initializing' || status === 'buffering') && !error && (
              <div className="absolute inset-0 z-10 flex flex-col items-center justify-center bg-black/50 backdrop-blur-sm">
                 <div className="w-16 h-16 border-4 border-red-600 border-t-transparent rounded-full animate-spin mb-4"></div>
-                <p className="text-white font-medium animate-pulse">{debugMsg || 'Buffering...'}</p>
+                <p className="text-white font-medium animate-pulse">{debugMsg}</p>
              </div>
         )}
 
@@ -219,12 +200,12 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({ channel, onClose }) => {
                         {error}
                         <br/>
                         <span className="text-sm text-gray-500 mt-2 block">
-                           The connection to the provider was lost or timed out.
+                           Connection to the stream provider failed or timed out.
                         </span>
                     </p>
                     <div className="flex justify-center gap-4">
                         <button 
-                            onClick={() => { setStatus('initializing'); setRetryCount(prev => prev + 1); }}
+                            onClick={() => { setStatus('initializing'); setRetryCount(0); }}
                             className="bg-gray-700 text-white font-bold py-2 px-6 rounded hover:bg-gray-600 transition"
                         >
                             Retry
