@@ -66,101 +66,113 @@ app.get('/api/health', (req, res) => {
     }
 });
 
-// --- NATIVE STREAM PROXY ---
-// Uses native http/https modules for lowest latency and proper Range support
+// --- SMART NATIVE PROXY ---
+// Handles Redirects Internally + Ignores SSL Errors + Pipes Streams
 app.get('/api/proxy', (req, res) => {
     const { url } = req.query;
     if (!url || typeof url !== 'string') return res.status(400).send('Url required');
 
-    try {
-        const targetUrl = new URL(url);
-        const isHttps = targetUrl.protocol === 'https:';
-        const client = isHttps ? https : http;
-
-        const headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-            'Accept': '*/*',
-            'Connection': 'keep-alive'
-        };
-
-        // CRITICAL: Forward Range header. 
-        // This tells upstream we only want a specific chunk (e.g., bytes=0-1024).
-        // Without this, upstream sends the whole file, causing the "downloading forever" issue.
-        if (req.headers.range) {
-            headers['Range'] = req.headers.range;
+    // Recursive function to handle redirects
+    const doRequest = (currentUrl, redirectCount) => {
+        if (redirectCount > 5) {
+             if (!res.headersSent) res.status(502).send('Too many redirects');
+             return;
         }
 
-        const proxyReq = client.get(url, { headers }, (proxyRes) => {
-            // Forward Status Code (200 or 206 Partial Content)
-            res.status(proxyRes.statusCode || 200);
+        try {
+            const target = new URL(currentUrl);
+            const isHttps = target.protocol === 'https:';
+            const client = isHttps ? https : http;
+            
+            // Forward headers but remove host-specific ones
+            const headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+                'Accept': '*/*',
+                'Connection': 'keep-alive'
+            };
+            if (req.headers.range) headers['Range'] = req.headers.range;
 
-            // Forward Headers
-            Object.keys(proxyRes.headers).forEach(key => {
-                // Skip content-encoding to avoid double compression issues
-                if (key === 'content-encoding') return;
-                // Forward everything else (Content-Type, Content-Length, Content-Range, etc.)
-                res.setHeader(key, proxyRes.headers[key]);
-            });
+            const options = {
+                headers,
+                // CRITICAL: Ignore upstream SSL errors (self-signed, IP mismatch, etc)
+                rejectUnauthorized: false 
+            };
+            if (isHttps) options.agent = new https.Agent({ rejectUnauthorized: false });
 
-            // Ensure no-cache for live streams
-            res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+            const proxyReq = client.get(currentUrl, options, (proxyRes) => {
+                // Follow Redirects Internally
+                if ([301, 302, 303, 307, 308].includes(proxyRes.statusCode) && proxyRes.headers.location) {
+                    proxyRes.resume(); // discard body
+                    // Resolve relative URLs in Location header
+                    const newLocation = new URL(proxyRes.headers.location, currentUrl).toString();
+                    return doRequest(newLocation, redirectCount + 1);
+                }
 
-            const contentType = proxyRes.headers['content-type'] || '';
-            const isM3U8 = contentType.includes('mpegurl') || contentType.includes('m3u8') || url.includes('.m3u8');
+                // Forward Status (200, 206, 404, etc)
+                res.status(proxyRes.statusCode || 200);
 
-            if (isM3U8) {
-                 // --- M3U8 PROCESSING (BUFFERED) ---
-                 // M3U8 files are small text files. We must buffer them to rewrite the URLs inside.
-                 let data = [];
-                 proxyRes.on('data', chunk => data.push(chunk));
-                 proxyRes.on('end', () => {
-                     try {
-                         const buffer = Buffer.concat(data);
-                         const text = buffer.toString('utf8');
-                         
-                         if (text.trim().startsWith('#EXTM3U')) {
-                             const baseUrl = url.substring(0, url.lastIndexOf('/') + 1);
+                // Forward Headers
+                Object.keys(proxyRes.headers).forEach(key => {
+                    if (['content-encoding', 'transfer-encoding', 'access-control-allow-origin'].includes(key)) return;
+                    res.setHeader(key, proxyRes.headers[key]);
+                });
+                
+                // Set CORS/Caching
+                res.setHeader('Access-Control-Allow-Origin', '*');
+                res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+
+                const contentType = proxyRes.headers['content-type'] || '';
+                const isM3U8 = contentType.includes('mpegurl') || contentType.includes('m3u8') || currentUrl.includes('.m3u8');
+
+                if (isM3U8) {
+                    // Buffer and Rewrite for M3U8
+                    const chunks = [];
+                    proxyRes.on('data', c => chunks.push(c));
+                    proxyRes.on('end', () => {
+                        const buffer = Buffer.concat(chunks);
+                        const text = buffer.toString('utf8');
+                        
+                        // Check if valid M3U
+                        if (text.trim().startsWith('#EXTM3U')) {
+                             const baseUrl = currentUrl.substring(0, currentUrl.lastIndexOf('/') + 1);
                              const rewritten = text.replace(/^(?!#)(?!\s)(.+)$/gm, (match) => {
-                                let target = match.trim();
-                                if (!target.startsWith('http')) {
-                                    try { target = new URL(target, baseUrl).toString(); } catch(e){}
+                                let line = match.trim();
+                                // Resolve relative URLs
+                                if (!line.startsWith('http')) {
+                                    try { line = new URL(line, baseUrl).toString(); } catch(e){}
                                 }
-                                return `/api/proxy?url=${encodeURIComponent(target)}`;
+                                // Wrap in proxy
+                                return `/api/proxy?url=${encodeURIComponent(line)}`;
                              });
-                             
-                             // Update length because content changed
                              res.setHeader('Content-Length', Buffer.byteLength(rewritten));
                              res.send(rewritten);
-                         } else {
-                             // Fallback if not actually M3U8 text
-                             res.write(buffer);
-                             res.end();
-                         }
-                     } catch (e) {
-                         res.end();
-                     }
-                 });
-            } else {
-                // --- BINARY STREAM (PIPED) ---
-                // For MP4, MKV, TS, etc. we pipe directly.
-                // This ensures backpressure is handled and bytes flow immediately.
-                proxyRes.pipe(res);
-            }
-        });
+                        } else {
+                            // Not actually text, pass through
+                            res.write(buffer);
+                            res.end();
+                        }
+                    });
+                } else {
+                    // Pipe Binary (MP4, MKV, TS) directly
+                    proxyRes.pipe(res);
+                }
+            });
 
-        proxyReq.on('error', (e) => {
-            if (!res.headersSent) res.sendStatus(502);
-            // console.error("Proxy Error:", e.message);
-        });
+            proxyReq.on('error', (err) => {
+                 if (!res.headersSent) res.status(502).send('Gateway Error');
+            });
+            
+            // Clean up if client disconnects
+            req.on('close', () => {
+                proxyReq.destroy();
+            });
 
-        // Cleanup: If browser cancels request (closes player), destroy upstream connection
-        req.on('close', () => {
-            proxyReq.destroy();
-        });
+        } catch (e) {
+             if (!res.headersSent) res.status(400).send('Invalid URL');
+        }
+    };
 
-    } catch (e) {
-        if (!res.headersSent) res.status(400).send("Invalid URL");
-    }
+    doRequest(url, 0);
 });
 
 // API: Upload Chunk (Keep existing)
